@@ -1,0 +1,27 @@
+name: Idea or feedback
+description: Something that would make Notch+ better for you
+labels: [idea]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would make it better?
+      description: Tell me what you were trying to do and what got in the way. Notch+ stays small on purpose, so the why matters more than the feature.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      options:
+        - Claude Code approvals
+        - Notifications
+        - Player or floating player
+        - Shelf
+        - Basket
+        - Look and feel
+        - Something new
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?

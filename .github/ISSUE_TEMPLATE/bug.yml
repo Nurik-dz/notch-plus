@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work the way it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.1"
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac model
+      placeholder: "MacBook Pro 14-inch, M4"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      options:
+        - Claude Code approvals
+        - Notifications
+        - Player or floating player
+        - Shelf
+        - Basket
+        - Settings
+        - Something else
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshot or screen recording
+      description: Drag it in here. It helps a lot.
