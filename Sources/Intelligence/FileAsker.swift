@@ -167,7 +167,7 @@ extension Intelligence {
             let session = LanguageModelSession(instructions: rules)
             let prompt = "\(note)File: \(r.url.lastPathComponent)\n---\n\(excerpt)\n---\n\n\(historyText(r.history))Question: \(r.question)"
             do {
-                for try await partial in session.streamResponse(to: prompt) { out.yield(clean(partial.content)) }
+                for try await partial in session.streamResponse(to: prompt) { out.yield(Intelligence.cleanAnswer(partial.content)) }
                 return
             } catch {
                 if String(describing: error).lowercased().contains("context"), attempt < 2 { budget /= 2; continue }
@@ -184,13 +184,13 @@ extension Intelligence {
                 historyText(r.history) + "Question: " + r.question
                 Attachment(imageURL: r.url)
             }
-            for try await partial in session.streamResponse(to: prompt) { out.yield(clean(partial.content)) }
+            for try await partial in session.streamResponse(to: prompt) { out.yield(Intelligence.cleanAnswer(partial.content)) }
         } else {
             let text = try await Task.detached { try Images.recognize(try Images.loadCGImage(r.url)) }.value
             guard !text.isEmpty else { throw ActionError(message: "This version of macOS can only read the text in a picture, and none was found.") }
             let session = LanguageModelSession(instructions: rules)
             let prompt = "Text read from the picture \(r.url.lastPathComponent):\n---\n\(text.prefix(14_000))\n---\n\n\(historyText(r.history))Question: \(r.question)"
-            for try await partial in session.streamResponse(to: prompt) { out.yield(clean(partial.content)) }
+            for try await partial in session.streamResponse(to: prompt) { out.yield(Intelligence.cleanAnswer(partial.content)) }
         }
     }
 }

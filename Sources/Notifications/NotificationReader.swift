@@ -9,6 +9,10 @@ struct RawNotification: Equatable {
     let subtitle: String?
     let body: String?
     let date: Date
+    /// The conversation it belongs to, when the app gives one (Messages: "any;-;<handle>" for a one-to-one chat).
+    var thread: String? = nil
+    /// An id the app gives it (Messages: the message's guid), used to show one message only once.
+    var guid: String? = nil
 }
 
 /// Reads the macOS notification database (read only). Needs Full Disk Access.
@@ -17,6 +21,9 @@ final class NotificationReader {
     let path: String
     private var db: OpaquePointer?
     private(set) var lastRecordID: Int64 = 0
+    /// Newest delivery time seen. macOS sometimes re-delivers a notification by updating its existing
+    /// record (Messages does for a repeated alert): same rec_id, newer delivered_date.
+    private(set) var lastDelivered: Double = 0
 
     init(path: String) { self.path = path }
     deinit { close() }
@@ -48,40 +55,63 @@ final class NotificationReader {
         db = nil
     }
 
+    /// Every app that macOS lets send notifications (its own list, not only the ones that already sent one).
+    func registeredApps() -> [String] {
+        guard open(), let db else { return [] }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT identifier FROM app", -1, &stmt, nil) == SQLITE_OK else { return [] }
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) { out.append(String(cString: c)) }
+        }
+        return out
+    }
+
     /// Start from "now": notifications that already exist are not shown again.
     func skipExisting() {
         guard open(), let db else { return }
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
-        guard sqlite3_prepare_v2(db, "SELECT MAX(rec_id) FROM record", -1, &stmt, nil) == SQLITE_OK,
+        guard sqlite3_prepare_v2(db, "SELECT MAX(rec_id), MAX(delivered_date) FROM record", -1, &stmt, nil) == SQLITE_OK,
               sqlite3_step(stmt) == SQLITE_ROW else { return }
         lastRecordID = sqlite3_column_int64(stmt, 0)
+        lastDelivered = sqlite3_column_double(stmt, 1)
     }
 
-    /// Everything newer than the last one seen, oldest first.
+    /// Everything new or re-delivered since the last look, oldest first.
     func readNew() -> [RawNotification] {
         guard open(), let db else { return [] }
         let sql = """
             SELECT r.rec_id, a.identifier, r.data, r.delivered_date
             FROM record r LEFT JOIN app a ON a.app_id = r.app_id
-            WHERE r.rec_id > ? ORDER BY r.rec_id ASC LIMIT 50
+            WHERE r.rec_id > ? OR r.delivered_date > ? ORDER BY r.delivered_date ASC, r.rec_id ASC LIMIT 50
             """
         var stmt: OpaquePointer?
-        defer { sqlite3_finalize(stmt) }
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        // a connection that went bad (the database was rebuilt, access was lost) is dropped and opened fresh next time
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            sqlite3_finalize(stmt); close(); return []
+        }
         sqlite3_bind_int64(stmt, 1, lastRecordID)
+        sqlite3_bind_double(stmt, 2, lastDelivered)
 
         var out: [RawNotification] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        var rc = sqlite3_step(stmt)
+        while rc == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             lastRecordID = max(lastRecordID, id)
             let bundle = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "unknown"
-            guard let blob = sqlite3_column_blob(stmt, 2) else { continue }
-            let data = Data(bytes: blob, count: Int(sqlite3_column_bytes(stmt, 2)))
-            let seconds = sqlite3_column_double(stmt, 3)
-            let date = seconds > 0 ? Date(timeIntervalSinceReferenceDate: seconds) : Date()
-            if let n = Self.parse(data: data, recordID: id, bundleID: bundle, date: date) { out.append(n) }
+            if let blob = sqlite3_column_blob(stmt, 2) {
+                let data = Data(bytes: blob, count: Int(sqlite3_column_bytes(stmt, 2)))
+                let seconds = sqlite3_column_double(stmt, 3)
+                lastDelivered = max(lastDelivered, seconds)
+                let date = seconds > 0 ? Date(timeIntervalSinceReferenceDate: seconds) : Date()
+                if let n = Self.parse(data: data, recordID: id, bundleID: bundle, date: date) { out.append(n) }
+            }
+            rc = sqlite3_step(stmt)
         }
+        sqlite3_finalize(stmt)
+        if rc != SQLITE_DONE { close() }
         return out
     }
 
@@ -97,7 +127,8 @@ final class NotificationReader {
             } else if let s = alert as? String { body = s }
         }
         if title == nil && subtitle == nil && body == nil { return nil }
-        return RawNotification(recordID: recordID, bundleID: bundleID, title: title, subtitle: subtitle, body: body, date: date)
+        return RawNotification(recordID: recordID, bundleID: bundleID, title: title, subtitle: subtitle, body: body, date: date,
+                               thread: content["thre"] as? String, guid: content["iden"] as? String)
     }
 }
 

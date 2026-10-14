@@ -2,3 +2,4 @@
 build/
 Notch+.app/
 *.xcuserstate
+dist/

@@ -27,7 +27,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.triage = { raw in await Intelligence.triage(raw, appName: AppLookup.name(for: raw.bundleID)) }
         model.explain = { r in await Intelligence.explain(tool: r.tool, headline: r.headline, detail: r.detail) }
         model.focusIsOn = { FocusState.isOn() }
+        model.sendMessage = { text, handle in try await MessagesReply.send(text, to: handle) }
+        model.suggestReplies = { n, handle in
+            let mine = await Task.detached { MessagesReply.recentSent(to: handle) }.value
+            return await Intelligence.suggestReplies(to: n.raw.body ?? n.headline, from: n.headline, myEarlier: mine)
+        }
         model.startClock()
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.model.macReturned() }
+        }
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.model.macReturned() }
+        }
 
         // What is playing, and the controls for it.
         nowPlaying = NowPlayingController.bundled()
@@ -45,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         power.start()
 
         notificationController = NotificationController(model: model)
+        HookInstaller(paths: paths).refreshScriptIfConnected()     // older installs get the current hook script
         settingsModel = SettingsModel(installer: HookInstaller(paths: paths), notch: model, notifications: notificationController)
 
         windowController = NotchWindowController(model: model, geometry: .current()) { [weak self] in

@@ -83,14 +83,50 @@ struct NotchRootView: View {
         let light = accent
         // the living edge light: full on open cards, gentle while Claude or a file action is working, off otherwise
         let glow: Double = (open ? 1 : ((state == .wings && (model.liveSession != nil || !model.jobs.isEmpty)) ? 0.55 : 0)) * model.glowLevel.factor * (Motion.lessTransparency ? 0.35 : 1)
+        // black like the hardware notch unless Liquid Glass is chosen in Settings
+        let glassy = open && model.islandStyle == .glass && !Motion.lessTransparency
+        let bubble = model.musicBubble
+        let bubbleX = bubble ? size.width / 2 - flare + Self.bubbleGap + Self.bubbleSize / 2
+                             : size.width / 2 - flare - Self.bubbleSize / 2 - 2
+        let bubbleY = (size.height - Self.bubbleSize) / 2
 
+        ZStack(alignment: .top) {
+            // the liquid layer: joins the island and the music drop with a neck while they are close
+            if state == .wings {
+                GooLayer(width: size.width - 2 * flare, height: size.height, radius: 14,
+                         dropX: bubbleX, dropY: bubbleY, dropSize: bubble ? Self.bubbleSize : Self.bubbleSize * 0.5)
+                    .allowsHitTesting(false)
+            }
+            island(state: state, open: open, glassy: glassy, size: size, shape: shape, light: light, glow: glow, rim: rim)
+            if state == .wings, let np = model.nowPlaying {
+                MusicDrop(info: np, size: Self.bubbleSize)
+                    .scaleEffect(bubble ? 1 : 0.5)
+                    .opacity(bubble ? 1 : 0)
+                    .offset(x: bubbleX, y: bubbleY)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .animation(Motion.spring(for: state), value: size)
+        .animation(Motion.drop, value: bubble)
+        .animation(.smooth(duration: 0.7), value: light)
+        .environment(\.colorScheme, .dark)
+    }
+
+    /// Size of the music drop beside the island, and the gap it keeps once it has split off.
+    static let bubbleSize: CGFloat = 26
+    static let bubbleGap: CGFloat = 12
+
+    @ViewBuilder
+    private func island(state: IslandState, open: Bool, glassy: Bool, size: CGSize, shape: NotchShape,
+                        light: Color, glow: Double, rim: Bool) -> some View {
         ZStack(alignment: .top) {
             // black body with a soft coloured light falling from the top
             ZStack {
-                // closed and small states are solid black so they match the hardware notch;
-                // the open island is real Liquid Glass tinted by the card's colour
-                shape.fill(Color.black).opacity(open ? 0 : 1)
-                if open {
+                // solid black like the hardware notch; with Liquid Glass chosen, the open island is
+                // real glass tinted by the card's colour
+                shape.fill(Color.black).opacity(glassy ? 0 : 1)
+                if glassy {
                     Color.clear
                         .glassEffect(.regular.tint(light.opacity(0.16)), in: shape)
                         .transition(.opacity)
@@ -113,11 +149,6 @@ struct NotchRootView: View {
                         .clipShape(shape)
                         .transition(.opacity)
                 }
-                if !open {
-                    RadialGradient(colors: [light.opacity(0.16), .clear],
-                                   center: .top, startRadius: 2, endRadius: max(size.width * 0.5, 40))
-                        .clipShape(shape)
-                }
             }
 
             ZStack(alignment: .top) {
@@ -136,16 +167,19 @@ struct NotchRootView: View {
                                                     .init(color: .white.opacity(0.03), location: 1.0)],
                                             startPoint: .top, endPoint: .bottom), lineWidth: 1)
                 GlowRim(shape: shape, accent: light, strength: glow)
+                // Claude has waited long: a soft amber ring swells and fades, the colour of the amber timer
+                ZStack {
+                    shape.stroke(Theme.amber, lineWidth: 9).blur(radius: 8).opacity(0.75)
+                    shape.stroke(Theme.amber, lineWidth: 2)
+                }
+                .opacity(open && model.pulsing ? 1 : 0)
+                .animation(.easeInOut(duration: 1.1), value: model.pulsing)
             }
             .allowsHitTesting(false)
         }
         .clipShape(shape)
         .shadow(color: .black.opacity(open ? 0.5 : 0), radius: 8, y: 3)          // tight contact shadow
         .modifier(Jelly(trigger: state, open: open))
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .animation(Motion.spring(for: state), value: size)
-        .animation(.smooth(duration: 0.7), value: light)
-        .environment(\.colorScheme, .dark)
     }
 
     // MARK: - The cards
@@ -155,8 +189,8 @@ struct NotchRootView: View {
     @ViewBuilder
     private func card(for state: IslandState, size: CGSize) -> some View {
         let width = geometry.width(state)
-        let inset = geometry.contentTopInset
-        let side = 14 + Self.flareOpen
+        let inset = geometry.cardTopInset
+        let side = NotchGeometry.cardSideInset
         switch state {
         case .closed:
             Color.clear
@@ -166,21 +200,21 @@ struct NotchRootView: View {
         case .notification:
             if let n = model.toast {
                 measured(state, width: width) {
-                    NotificationCard(model: model, notification: n)
+                    NotificationCard(model: model, geometry: geometry, notification: n)
                         .padding(.top, inset).padding(.horizontal, side).padding(.bottom, 18)
                 }
             }
         case .finished:
             if let f = model.finished {
                 measured(state, width: width) {
-                    FinishedCard(model: model, finish: f)
+                    FinishedCard(model: model, geometry: geometry, finish: f)
                         .padding(.top, inset).padding(.horizontal, side).padding(.bottom, 18)
                 }
             }
         case .result:
             if let o = model.outcome {
                 measured(state, width: width) {
-                    ResultCard(model: model, outcome: o)
+                    ResultCard(model: model, geometry: geometry, outcome: o)
                         .padding(.top, inset).padding(.horizontal, side).padding(.bottom, 18)
                 }
             }
@@ -192,8 +226,14 @@ struct NotchRootView: View {
         case .approval:
             if let item = model.current {
                 measured(state, width: width) {
-                    ApprovalCard(model: model, request: item.request, queued: model.pending.count)
-                        .padding(.top, inset).padding(.horizontal, side).padding(.bottom, 16)
+                    Group {
+                        if item.request.isQuestion {
+                            QuestionCard(model: model, geometry: geometry, request: item.request, queued: model.pending.count)
+                        } else {
+                            ApprovalCard(model: model, geometry: geometry, request: item.request, queued: model.pending.count)
+                        }
+                    }
+                    .padding(.top, inset).padding(.horizontal, side).padding(.bottom, 16)
                 }
             }
         }

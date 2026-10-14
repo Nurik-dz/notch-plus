@@ -24,11 +24,21 @@ struct NotchGeometry {
     /// Space above the content so nothing hides behind the notch.
     var contentTopInset: CGFloat { hasNotch ? notchSize.height + 4 : 12 }
 
+    /// Above the cards: their first row sits beside the notch, so no empty band is left under it.
+    var cardTopInset: CGFloat { hasNotch ? 0 : 12 }
+
     static let overviewWidth: CGFloat = 500
-    static let approvalWidth: CGFloat = 500
-    static let notificationWidth: CGFloat = 440
-    static let finishedWidth: CGFloat = 440
-    static let resultWidth: CGFloat = 470
+    static let approvalWidth: CGFloat = 460
+    static let notificationWidth: CGFloat = 400
+    static let finishedWidth: CGFloat = 400
+    static let resultWidth: CGFloat = 440
+    /// Side space of the small cards (clears the flared top corners).
+    static let cardSideInset: CGFloat = 28
+
+    /// Width of each side of a row that sits beside the notch on a card of the given width.
+    func besideNotchWidth(cardWidth: CGFloat, inset: CGFloat = NotchGeometry.cardSideInset) -> CGFloat {
+        max((cardWidth - 2 * inset - notchSize.width) / 2, 40)
+    }
     static let wingWidth: CGFloat = 104
     static let shadowPad: CGFloat = 56
     /// The tallest content any card may have; sets the size of the fixed window.
@@ -50,12 +60,12 @@ struct NotchGeometry {
     func fallbackHeight(_ state: IslandState) -> CGFloat {
         switch state {
         case .closed: hasNotch ? notchSize.height : 0
-        case .wings: hasNotch ? notchSize.height + 7 : 34
-        case .notification: contentTopInset + 74
-        case .finished: contentTopInset + 82
-        case .result: contentTopInset + 96
+        case .wings: hasNotch ? notchSize.height : 34     // level with the menu bar, like the notch itself
+        case .notification: cardTopInset + 112
+        case .finished: cardTopInset + 104
+        case .result: cardTopInset + 120
         case .overview: contentTopInset + 96
-        case .approval: contentTopInset + 176
+        case .approval: cardTopInset + 196
         }
     }
 

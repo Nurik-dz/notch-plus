@@ -15,6 +15,7 @@ struct HomeView: View {
                 switch model.homeTab {
                 case .player: PlayerPane(model: model)
                 case .shelf: ShelfPane(model: model, shelf: shelf)
+                case .recent: RecentPane(model: model)
                 }
             }
             .rise(1)
@@ -27,10 +28,17 @@ struct HomeView: View {
     /// The tabs sit beside the physical notch (in the space that used to be empty), the gear on the other side.
     private var header: some View {
         let tabs = HStack(spacing: 2) {
+            // three tabs do not fit with names beside the notch: then all are icons
+            let compact = !model.notifications.isEmpty
             TabPill(title: "Player", symbol: "play.circle.fill", selected: model.homeTab == .player,
-                    badge: model.nowPlaying?.playing == true ? Theme.green : nil) { model.homeChoice = .player }
+                    badge: model.nowPlaying?.playing == true ? Theme.green : nil, iconOnly: compact) { model.homeChoice = .player }
             TabPill(title: "Shelf", symbol: "tray.fill", selected: model.homeTab == .shelf,
-                    count: shelf.items.count) { model.homeChoice = .shelf }
+                    count: shelf.items.count, iconOnly: compact) { model.homeChoice = .shelf }
+            // recent notifications, once there are any; the number is the quiet ones not seen yet
+            if !model.notifications.isEmpty {
+                TabPill(title: "Recent", symbol: "bell.fill", selected: model.homeTab == .recent,
+                        count: model.quietUnseen, iconOnly: true) { model.openRecent() }
+            }
         }
         let gear = Button { openSettings() } label: { Image(systemName: "gearshape.fill") }
             .buttonStyle(RoundIconButtonStyle()).accessibilityLabel("Notch+ settings")
@@ -152,6 +160,14 @@ private struct PlayerPane: View {
                 Text("Nothing is playing").font(Theme.label(13, .semibold))
                 Text("Play music or a video in any app and it shows up here, with controls.")
                     .font(Theme.text(11.5)).foregroundStyle(Theme.secondary).multilineTextAlignment(.center)
+                Button { MusicLibrary.startPlaying() } label: {
+                    Label("Play from Music", systemImage: "play.fill")
+                        .font(Theme.label(11.5, .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 12).frame(height: 28)
+                        .background(Capsule().fill(Color.white.opacity(0.14)))
+                }
+                .buttonStyle(.plain).hoverLift(1.04).padding(.top, 4)
+                .help("Opens Music and plays where you left off, or shuffles your library")
             }
             .frame(maxWidth: .infinity, minHeight: 96)
         }
@@ -163,6 +179,7 @@ private struct PlayerCard: View {
     let info: NowPlayingInfo
     @State private var scrubbing: Double?
     @State private var torn = false
+    @State private var musicControls: MusicControls?
 
     var body: some View {
         VStack(spacing: 8) {
@@ -180,7 +197,11 @@ private struct PlayerCard: View {
                         .font(Theme.text(12)).foregroundStyle(Theme.secondary).lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                controls
+                // previous, play, next; under them Music's own star, shuffle and repeat (only when Music answers), as tall as the cover together
+                VStack(spacing: 9) {
+                    controls
+                    if let c = musicControls { MediaSwitches(controls: c, accent: accent, size: 26) { musicControls = $0 } }
+                }
             }
             progress
         }
@@ -191,6 +212,9 @@ private struct PlayerCard: View {
             }
             .onEnded { _ in torn = false })
         .help("Drag down to float this player above your windows")
+        .task(id: "\(info.bundleID)|\(info.title)|\(info.artist)") {
+            musicControls = info.bundleID == MusicLibrary.bundleID ? await MusicLibrary.controls() : nil
+        }
     }
 
     private var accent: Color {
@@ -250,19 +274,87 @@ private struct PlayerCard: View {
 }
 
 /// Four little bars that dance while something plays.
+/// Music is playing: a small wave of rounded bars that grow from the middle, taller in the centre,
+/// moving smoothly and tinted from the cover (like the iPhone's island). The motion is drawn, not the real
+/// sound: reading the real audio would need the Screen Recording permission.
 struct EqualizerBars: View {
     let color: Color
+    /// How tall each bar may get: a wave shape, highest in the middle.
+    private static let envelope: [Double] = [0.45, 0.75, 1.0, 0.75, 0.45]
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.12)) { ctx in
+        TimelineView(.animation(minimumInterval: 1.0 / 60)) { ctx in
             let t = ctx.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(0..<4, id: \.self) { i in
-                    let h = Motion.reduce ? 0.6 : 0.35 + 0.65 * abs(sin(t * (2.6 + Double(i) * 0.9) + Double(i)))
-                    Capsule().fill(color).frame(width: 2.5, height: 12 * h)
+            HStack(alignment: .center, spacing: 2.5) {
+                ForEach(Self.envelope.indices, id: \.self) { i in
+                    let k = Double(i)
+                    // two slow waves at unrelated speeds, so it never looks like a loop
+                    let wave = 0.5 + 0.3 * sin(t * (3.1 + k * 0.7) + k * 1.9) + 0.2 * sin(t * (5.3 - k * 0.4) + k * 0.8)
+                    let level = Motion.reduce ? 0.7 : 0.45 + 0.55 * wave
+                    Capsule()
+                        .fill(LinearGradient(colors: [color, color.opacity(0.55)], startPoint: .top, endPoint: .bottom))
+                        .frame(width: 3, height: max(5, 18 * Self.envelope[i] * level))
                 }
             }
-            .frame(height: 12, alignment: .bottom)
+            .frame(height: 18)
+            .shadow(color: color.opacity(0.45), radius: 4)
         }
+    }
+}
+
+// MARK: - Recent notifications
+
+/// The last notifications, including the quiet ones that never opened a card. Click one to open its app.
+private struct RecentPane: View {
+    @ObservedObject var model: NotchModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 5) {
+                    ForEach(model.notifications) { n in RecentRow(note: n) { model.openSource(of: n) } }
+                }
+            }
+            .frame(maxHeight: 220)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Clear") { withAnimation(Motion.content) { model.clearRecent() } }
+                    .buttonStyle(.plain).font(Theme.label(11, .semibold)).foregroundStyle(Theme.tertiary)
+                    .help("Empty this list (the apps keep their notifications)")
+            }
+        }
+    }
+}
+
+private struct RecentRow: View {
+    let note: CapturedNotification
+    let open: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(alignment: .top, spacing: 10) {
+                AppIconView(bundleID: note.bundleID, size: 22, glow: false)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(note.headline).font(Theme.label(12.5, .semibold)).foregroundStyle(.white).lineLimit(1)
+                        if note.priority == .now { Chip(text: "Needs you", color: Theme.amber) }
+                        Spacer(minLength: 4)
+                        Text(Elapsed.ago(note.raw.date)).font(Theme.label(10)).foregroundStyle(Theme.tertiary)
+                    }
+                    Text(note.summary ?? note.detail ?? note.appName).font(Theme.text(11.5))
+                        .foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(hover ? 0.10 : 0.05)))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .animation(Motion.hover, value: hover)
+        .help("Open \(note.appName)")
     }
 }
 
@@ -476,7 +568,7 @@ struct ShelfActionBar: View {
                         Menu("Transcribe in") { ForEach(m.transcribeIn) { a in Button(a.title) { model.startAction(a.id, on: item) } } }
                     }
                     if !m.translate.isEmpty {
-                        Menu(m.translateTitle) { ForEach(m.translate) { a in Button(a.title) { model.startAction(a.id, on: item) } } }
+                        LanguageMenu(title: m.translateTitle, actions: m.translate) { model.startAction($0.id, on: item) }
                     }
                     if !m.convert.isEmpty {
                         Menu("Convert") { ForEach(m.convert) { a in Button(a.title) { model.startAction(a.id, on: item) } } }
@@ -583,9 +675,7 @@ struct ShelfTile: View {
                         }
                     }
                     if !m.translate.isEmpty {
-                        Menu(m.translateTitle) {
-                            ForEach(m.translate) { a in Button(a.title) { model.startAction(a.id, on: item) } }
-                        }
+                        LanguageMenu(title: m.translateTitle, actions: m.translate) { model.startAction($0.id, on: item) }
                     }
                 } label: { Label("Apple Intelligence", systemImage: "sparkles") }
                 if !m.convert.isEmpty {

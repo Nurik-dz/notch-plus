@@ -11,7 +11,11 @@ final class BasketPanel: NSPanel {
 /// It is another door to the shelf: dropping here puts files on the shelf, and it shows the shelf's files.
 @MainActor
 final class BasketController: ObservableObject {
-    static let size = CGSize(width: 460, height: 318)       // the window, with room for the shadow
+    /// The visible basket, and the window around it with room for its soft shadow to fade out
+    /// (too little room cuts the shadow off in a straight line, like a dark rectangle).
+    static let shadowRoom: CGFloat = 44
+    static let content = CGSize(width: 412, height: 270)
+    static let size = CGSize(width: content.width + 2 * shadowRoom, height: content.height + 2 * shadowRoom)
 
     let model: NotchModel
     private let visibleFrame: () -> CGRect
@@ -129,6 +133,7 @@ struct BasketView: View {
     @ObservedObject var own: ShelfStore
     @ObservedObject var controller: BasketController
     @State private var selected: UUID?
+    @State private var flying: Set<UUID> = []
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 30, style: .continuous)
@@ -139,9 +144,10 @@ struct BasketView: View {
             content(store).padding(.horizontal, 18).padding(.vertical, 14)
             GlowRim(shape: shape, accent: Theme.violet, strength: controller.shown ? (active ? 1.4 : 0.8) : 0)
         }
-        .frame(width: BasketController.size.width - 48, height: BasketController.size.height - 48)
+        .frame(width: BasketController.content.width, height: BasketController.content.height)
         .clipShape(shape)
-        .shadow(color: .black.opacity(0.55), radius: 16, y: 8)
+        .shadow(color: .black.opacity(0.30), radius: 14, y: 8)
+        .shadow(color: .black.opacity(0.18), radius: 2.5, y: 1)
         .scaleEffect(controller.shown ? 1 : 0.86, anchor: .center)
         .opacity(controller.shown ? 1 : 0)
         .animation(Motion.reduce ? .easeOut(duration: 0.12) : .spring(response: 0.32, dampingFraction: 0.72), value: controller.shown)
@@ -152,37 +158,54 @@ struct BasketView: View {
         .dropDestination(for: URL.self) { urls, _ in controller.dropped(urls) } isTargeted: { controller.targeted = $0 }
     }
 
+    /// The chosen files (or all, when none is chosen) rise toward the notch, then land on the shelf.
+    private func moveToShelf(_ list: ShelfStore) {
+        let chosen = list.items.filter { model.selection.contains($0.id) }.map(\.id)
+        let ids = chosen.isEmpty ? list.items.map(\.id) : chosen
+        guard !ids.isEmpty, flying.isEmpty else { return }
+        flying = Set(ids)
+        model.showFlash(NotchModel.Flash(symbol: "tray.and.arrow.up.fill", text: ids.count == 1 ? "To shelf" : "\(ids.count) to shelf", good: true), seconds: 1.8)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (Motion.reduce ? 0.05 : 0.42)) {
+            model.sendToShelf(ids)
+            flying = []
+        }
+    }
+
+    /// A small round glass button; lit when its switch is on.
+    private func iconButton(_ symbol: String, on: Bool = false, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(on ? Color.white : Color.white.opacity(0.78))
+                .frame(width: 26, height: 26)
+                .glassEffect(on ? .regular.tint(Theme.violet.opacity(0.6)).interactive() : .regular.interactive(), in: Circle())
+        }
+        .buttonStyle(.plain).help(help).accessibilityLabel(help)
+    }
+
     @ViewBuilder private func content(_ shelf: ShelfStore) -> some View {
         VStack(spacing: 8) {
-            HStack {
-                Image(systemName: "tray.fill").foregroundStyle(Theme.violet)
-                Text(shelf.items.isEmpty ? "Basket" : "\(shelf.items.count) in the basket")
-                    .font(Theme.label(12, .semibold))
-                Spacer()
-                Button { model.basketSendsToShelf.toggle() } label: {
-                    Text(model.basketSendsToShelf ? "Also on shelf" : "Basket only")
-                        .font(Theme.label(10.5, .semibold))
-                        .padding(.horizontal, 8).frame(height: 20)
-                        .glassEffect(model.basketSendsToShelf ? .regular.tint(Theme.violet.opacity(0.5)).interactive() : .regular.interactive(), in: Capsule())
+            HStack(spacing: 8) {
+                // the count; with several files a tap on it selects them all
+                Button { if shelf.items.count > 1 { model.selection.selectAll(shelf.items.map(\.id)) } } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "tray.fill").foregroundStyle(Theme.violet)
+                        Text(shelf.items.isEmpty ? "Basket" : "\(shelf.items.count) in the basket").font(Theme.label(12.5, .semibold))
+                    }
                 }
                 .buttonStyle(.plain)
-                .help(model.basketSendsToShelf ? "Files here are also on the notch shelf. Click to keep them in the basket only." : "Files here stay in the basket. Click to share them with the notch shelf.")
-                if !model.basketSendsToShelf, !shelf.items.isEmpty {
-                    Button("To shelf") { model.sendToShelf(shelf.items.filter { model.selection.contains($0.id) }.map(\.id)) }
-                        .buttonStyle(.plain).font(Theme.label(11, .semibold)).foregroundStyle(Theme.blue)
-                        .help("Move the selected files onto the notch shelf")
+                .help(shelf.items.count > 1 ? "Select all the files" : "Drop files here to keep them")
+                Spacer(minLength: 0)
+                GlassEffectContainer(spacing: 6) {
+                    HStack(spacing: 6) {
+                        if !model.basketSendsToShelf, !shelf.items.isEmpty {
+                            iconButton("arrow.up.to.line", help: "Move to the notch shelf (the selected files, or all of them)") { moveToShelf(shelf) }
+                        }
+                        if !shelf.items.isEmpty {
+                            iconButton("trash", help: "Empty the basket (your files are not touched)") { shelf.clear(); model.selection.clear() }
+                        }
+                        iconButton("xmark", help: "Close the basket") { controller.hide() }
+                    }
                 }
-                if shelf.items.count > 1 {
-                    Button("Select all") { model.selection.selectAll(shelf.items.map(\.id)) }
-                        .buttonStyle(.plain).font(Theme.label(11, .semibold)).foregroundStyle(Theme.secondary)
-                }
-                if !shelf.items.isEmpty {
-                    Button("Clear") { shelf.clear(); model.selection.clear() }
-                        .buttonStyle(.plain).font(Theme.label(11, .semibold)).foregroundStyle(Theme.secondary)
-                }
-                Button { controller.hide() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 15)) }
-                    .buttonStyle(.plain).foregroundStyle(Theme.tertiary)
-                    .accessibilityLabel("Close the basket")
             }
             if shelf.items.isEmpty {
                 VStack(spacing: 6) {
@@ -194,7 +217,7 @@ struct BasketView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                FileGrid(model: model, store: shelf, columns: 5, maxHeight: 176)
+                FileGrid(model: model, store: shelf, columns: 5, maxHeight: 176, flying: flying)
                 if model.selection.count > 1 {
                     FileBulkBar(model: model, store: shelf)
                 } else if let item = shelf.items.first(where: { model.selection.contains($0.id) }) {

@@ -49,7 +49,16 @@ xcrun clang -dynamiclib -fobjc-arc -arch arm64 -framework Foundation Vendor/npse
 cp "$BUILD/libnpseek.dylib" "$APP/Contents/Resources/"
 cp Vendor/npseek.pl "$APP/Contents/Resources/"
 
-echo "==> Signing (ad-hoc)"
-codesign --force --deep --sign - "$APP"
+# A stable signing identity keeps Full Disk Access (and every other permission) across rebuilds and updates.
+# "Notch+ Developer" is a self-signed certificate in the login keychain; without it the app is signed ad-hoc,
+# and macOS then treats every rebuild as a new app and forgets its permissions.
+# NOTCH_SIGN=adhoc forces a plain ad-hoc signature: that is what a public download uses (Scripts/make_dmg.sh).
+if [ "${NOTCH_SIGN:-}" != "adhoc" ] && security find-identity -p codesigning 2>/dev/null | grep -q '"Notch+ Developer"'; then
+  echo "==> Signing (Notch+ Developer)"
+  codesign --force --deep --sign "Notch+ Developer" "$APP"
+else
+  echo "==> Signing (ad-hoc)"
+  codesign --force --deep --sign - "$APP"
+fi
 codesign --verify "$APP"
 echo "==> Built: $APP"

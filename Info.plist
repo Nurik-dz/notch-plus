@@ -8,11 +8,13 @@
     <key>CFBundleName</key><string>Notch+</string>
     <key>CFBundleDisplayName</key><string>Notch+</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.2</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Notch+ sends your Messages replies when you press Send, brings the right terminal tab forward, and asks Music for the lyrics and the song list of what is playing.</string>
     <key>NSAccessibilityUsageDescription</key>
     <string>Notch+ reads the text of notification banners so it can show them in the notch.</string>
 </dict>

@@ -69,6 +69,8 @@ struct FileGrid: View {
     let columns: Int
     let maxHeight: CGFloat
     var showsDropPlaceholder = false
+    /// Files that are leaving for the shelf: they rise toward the notch and fade.
+    var flying: Set<UUID> = []
 
     private static let tile: CGFloat = 66
     private static let rowHeight: CGFloat = 82
@@ -81,9 +83,14 @@ struct FileGrid: View {
         ScrollView(.vertical, showsIndicators: rows * Int(Self.rowHeight) > Int(maxHeight)) {
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(Self.tile + 4), spacing: 6), count: columns), alignment: .leading, spacing: 6) {
                 ForEach(store.items) { item in
+                    let leaving = flying.contains(item.id)
                     ShelfTile(model: model, shelf: store, item: item, selected: model.selection.contains(item.id)) {
                         withAnimation(Motion.hover) { model.clickFile(item.id, in: store) }
                     }
+                    .offset(y: leaving ? -90 : 0)
+                    .scaleEffect(leaving ? 0.35 : 1)
+                    .opacity(leaving ? 0 : 1)
+                    .animation(.easeIn(duration: 0.4), value: leaving)
                 }
                 if showsDropPlaceholder {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -181,5 +188,27 @@ struct FileBulkBar: View {
             .fixedSize()
             .help("Drag all \(n) selected files into any app")
             .accessibilityLabel("Drag \(n) selected files")
+    }
+}
+
+/// Translate to: a short list of the languages you probably want, the rest one step further, not twenty at once.
+struct LanguageMenu: View {
+    let title: String
+    let actions: [FileAction]
+    let run: (FileAction) -> Void
+
+    private func language(_ a: FileAction) -> String { String(a.id.split(separator: ":").last ?? "") }
+
+    var body: some View {
+        let first = Translator.favourites(from: actions.map(language))
+        let top = first.compactMap { id in actions.first { language($0) == id } }
+        let rest = actions.filter { a in !first.contains(language(a)) }
+        Menu(title) {
+            ForEach(top) { a in Button(a.title) { run(a) } }
+            if !rest.isEmpty {
+                Divider()
+                Menu("More languages") { ForEach(rest) { a in Button(a.title) { run(a) } } }
+            }
+        }
     }
 }

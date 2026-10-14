@@ -1,3 +1,29 @@
 Notch+ uses the mediaremote-adapter by Jonas van den Berg (https://github.com/ungive/mediaremote-adapter) to read what is playing on this Mac.
 Files: Vendor/mediaremote-adapter.pl and Vendor/MediaRemoteAdapter.framework.
 License: BSD 3-Clause. Copyright (c) 2025 Jonas van den Berg. Redistribution and use in source and binary forms, with or without modification, are permitted provided that the copyright notice, this list of conditions and the disclaimer in the BSD 3-Clause License are retained.
+
+
+Notch+ adapts the drag card and the System Settings window tracking of PermissionFlow (https://github.com/jaywcjlove/PermissionFlow) in Sources/System/AccessGuide.swift.
+Its licence:
+
+MIT License
+
+Copyright (c) 2026 小弟调调
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

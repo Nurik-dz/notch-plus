@@ -7,8 +7,11 @@ enum NotchConfig {
 
 /// All file locations in one place so tests can point at a scratch home.
 struct AppPaths {
+    /// Set by the test harness so nothing it does can touch the real shelf, basket or settings.
+    nonisolated(unsafe) static var defaultHome = URL(fileURLWithPath: NSHomeDirectory())
+
     let home: URL
-    init(home: URL = URL(fileURLWithPath: NSHomeDirectory())) { self.home = home }
+    init(home: URL = AppPaths.defaultHome) { self.home = home }
 
     var support: URL { home.appendingPathComponent("Library/Application Support/NotchPlus") }
     var token: URL { support.appendingPathComponent("token") }

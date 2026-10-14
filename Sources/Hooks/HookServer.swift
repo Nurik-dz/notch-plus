@@ -7,6 +7,8 @@ final class HookConnection {
     private let lock = NSLock()
     private var finished = false
     var onClose: (@MainActor () -> Void)?
+    /// The body that was sent back (checked by the tests).
+    private(set) var sentBody: String?
 
     init(_ c: NWConnection) { conn = c }
 
@@ -17,6 +19,7 @@ final class HookConnection {
         lock.lock(); defer { lock.unlock() }
         guard !finished else { return }
         finished = true
+        sentBody = body
         let out = Data(body.utf8)
         let head = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(out.count)\r\nConnection: close\r\n\r\n"
         conn.send(content: Data(head.utf8) + out, completion: .contentProcessed { [conn] _ in conn.cancel() })
@@ -100,8 +103,17 @@ final class HookServer {
         let auth = lines.first { $0.lowercased().hasPrefix("authorization:") }?
             .dropFirst(14).trimmingCharacters(in: .whitespaces) ?? ""
         guard Self.constantTimeEqual(auth, "Bearer " + token) else { hc.reject("401 Unauthorized"); return }
-        guard let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
+        guard var json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
             hc.reject("400 Bad Request"); return
+        }
+        // the hook script adds which terminal the session runs in: app|tab id|iTerm2 session|tty|project folder
+        if let t = lines.first(where: { $0.lowercased().hasPrefix("x-notch-terminal:") }) {
+            let parts = t.dropFirst("x-notch-terminal:".count).trimmingCharacters(in: .whitespaces)
+                .components(separatedBy: "|")
+            if parts.count >= 4 {
+                json[TerminalRef.key] = ["program": parts[0], "tab": parts[1], "iterm": parts[2], "tty": parts[3]]
+            }
+            if parts.count >= 5, !parts[4].isEmpty { json["_notch_project_dir"] = parts[4] }
         }
         if isEvent {
             // Status events are answered at once; Claude Code never waits on them.

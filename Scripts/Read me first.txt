@@ -1,0 +1,25 @@
+NOTCH+ : READ ME FIRST
+
+Notch+ is free and open source. It is NOT notarized by Apple, because notarizing needs a paid Apple Developer account, and the developer is not able to enroll in it. The app is signed ad-hoc and its source is public, so you can read it or build it yourself.
+
+Because of that, macOS shows a warning the first time you open it. This is normal. To open it once:
+
+  1. Drag Notch+ into Applications.
+  2. Open it. macOS says it "could not verify" Notch+. Click Done.
+  3. Open System Settings > Privacy & Security and scroll down to Security.
+     Click "Open Anyway" next to Notch+, enter your password, then click Open.
+  You only do this once.
+
+Prefer the Terminal? This does the same thing:
+  xattr -dr com.apple.quarantine /Applications/Notch+.app
+
+Then:
+  - Open Settings (the gear in the notch, or the menu bar item).
+  - Claude Code tab: Connect. You see the exact change first, and a backup is saved.
+  - Notifications tab: "Give Full Disk Access..." and drag the Notch+ icon into the list, so Notch+ can read notifications and Messages.
+  - Shelf and Basket, General: choose what you want.
+
+Needs a Mac with Apple silicon and macOS 26 or later.
+Everything runs on your Mac. Nothing is sent anywhere.
+Source and help: https://github.com/Nurik-dz/notch-plus
+Website: https://notch-plus.pages.dev/

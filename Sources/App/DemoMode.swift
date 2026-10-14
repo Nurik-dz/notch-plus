@@ -5,7 +5,7 @@ import notify
 /// A scripted tour with made-up data, only when the app is started with NOTCH_DEMO set.
 /// Shows every state in the notch without touching Claude Code or any real notification.
 /// NOTCH_DEMO=1 plays the whole tour at launch. NOTCH_DEMO=wait plays nothing until told, one step at a time
-/// (for screen recordings): `notifyutil -p notchplus.demo.status` (or .notification, .approval, .finish, .all).
+/// (for screen recordings): `notifyutil -p notchplus.demo.status` (or .notification, .approval, .finish, .question, .messages, .all).
 @MainActor
 enum DemoMode {
     static var isOn: Bool { ProcessInfo.processInfo.environment["NOTCH_DEMO"] != nil }
@@ -26,6 +26,8 @@ enum DemoMode {
             ("notification", { notification(model) }),
             ("approval", { approval(model) }),
             ("finish", { finish(model) }),
+            ("question", { question(model) }),
+            ("messages", { messages(model) }),
             ("all", { run(model: model) }),
         ]
         for (name, action) in steps {
@@ -67,6 +69,30 @@ enum DemoMode {
             "permission_suggestions": [["type": "addRules", "rules": [["toolName": "Bash"]], "behavior": "allow", "destination": "localSettings"]],
         ]
         model.handle(json: json, connection: HookConnection(NWConnection(host: "127.0.0.1", port: 9, using: .tcp)))
+    }
+
+    // Claude asks its own question, answered from the notch
+    private static func question(_ model: NotchModel) {
+        let json: [String: Any] = [
+            "tool_name": "AskUserQuestion", "session_id": "demo", "cwd": cwd,
+            "tool_input": ["questions": [[
+                "question": "Which layout should the settings window use?", "header": "Layout", "multiSelect": false,
+                "options": [["label": "Four tabs (Recommended)", "description": "General, Claude Code, Notifications, Shelf and Basket."],
+                            ["label": "One long page", "description": "Everything in a single scrolling list."]],
+            ]]],
+        ]
+        model.handle(json: json, connection: HookConnection(NWConnection(host: "127.0.0.1", port: 9, using: .tcp)))
+    }
+
+    // A message from a person, with its quick Reply
+    private static func messages(_ model: NotchModel) {
+        var note = CapturedNotification(
+            raw: RawNotification(recordID: 2, bundleID: "com.apple.MobileSMS", title: "Sam", subtitle: nil,
+                                 body: "Are we still on for dinner at 8? I can book the table now.",
+                                 date: Date(), thread: "any;-;+15550100", guid: "demo-message"), appName: "Messages")
+        note.priority = .now
+        model.notifications.insert(note, at: 0)
+        model.showToast(note, seconds: 8)
     }
 
     // 4. Claude finishes a long task

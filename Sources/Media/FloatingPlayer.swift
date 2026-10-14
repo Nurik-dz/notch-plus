@@ -8,12 +8,22 @@ import Combine
 @MainActor
 final class FloatingPlayerController {
     /// The window, with room for the shadow, in the full and the compact version.
-    static let size = FloatingPlayerController.windowSize(compact: false)
-    static func contentSize(compact: Bool) -> CGSize { compact ? CGSize(width: 258, height: 58) : CGSize(width: 340, height: 122) }
-    static func windowSize(compact: Bool) -> CGSize {
-        let c = contentSize(compact: compact)
-        return CGSize(width: c.width + 48, height: c.height + 48)
+    static let size = FloatingPlayerController.windowSize(.large)
+    static func contentSize(_ size: NotchModel.FloatingSize) -> CGSize {
+        switch size {
+        case .compact: CGSize(width: 258, height: 58)
+        case .full: CGSize(width: 340, height: 122)
+        case .large: CGSize(width: 300, height: 420)
+        }
     }
+    /// Space around the card inside the window, so its soft shadow fades out fully instead of being cut off in a straight line.
+    static let shadowRoom: CGFloat = 44
+    static func windowSize(_ size: NotchModel.FloatingSize) -> CGSize {
+        let c = contentSize(size)
+        return CGSize(width: c.width + 2 * shadowRoom, height: c.height + 2 * shadowRoom)
+    }
+    static func contentSize(compact: Bool) -> CGSize { contentSize(compact ? .compact : .full) }
+    static func windowSize(compact: Bool) -> CGSize { windowSize(compact ? .compact : .full) }
     static let snapDistance: CGFloat = 24
     static let snapMargin: CGFloat = 10
 
@@ -24,7 +34,7 @@ final class FloatingPlayerController {
     private var moveObserver: NSObjectProtocol?
     private var tracker: Timer?
     private var followOffset: CGPoint?          // set while the player is being carried by the pointer after a tear-off
-    private var compactShown = false
+    private var shownSize: NotchModel.FloatingSize = .compact
 
     init(model: NotchModel, visibleFrame: @escaping () -> CGRect = { (NSScreen.main ?? NSScreen.screens[0]).visibleFrame }) {
         self.model = model
@@ -48,15 +58,15 @@ final class FloatingPlayerController {
         if shouldShow {
             let p = panel ?? makePanel()
             if !p.isVisible {
-                compactShown = model.floatingCompact
+                shownSize = model.floatingSize
                 var f = initialFrame()
-                f.size = Self.windowSize(compact: compactShown)
+                f.size = Self.windowSize(shownSize)
                 p.setFrame(f, display: true)
                 p.alphaValue = 0
                 p.orderFrontRegardless()
                 NSAnimationContext.runAnimationGroup { $0.duration = 0.2; p.animator().alphaValue = 1 }
-            } else if compactShown != model.floatingCompact {
-                resize(p, compact: model.floatingCompact)
+            } else if shownSize != model.floatingSize {
+                resize(p, to: model.floatingSize)
             }
         } else if let p = panel, p.isVisible {
             NSAnimationContext.runAnimationGroup({ $0.duration = 0.18; p.animator().alphaValue = 0 }, completionHandler: { [weak self] in
@@ -66,11 +76,11 @@ final class FloatingPlayerController {
         }
     }
 
-    /// Full and compact keep the same top left corner.
-    private func resize(_ p: FloatingPlayerPanel, compact: Bool) {
-        compactShown = compact
+    /// Every size keeps the same top left corner.
+    private func resize(_ p: FloatingPlayerPanel, to newSize: NotchModel.FloatingSize) {
+        shownSize = newSize
         let old = p.frame
-        let size = Self.windowSize(compact: compact)
+        let size = Self.windowSize(newSize)
         let f = CGRect(x: old.minX, y: old.maxY - size.height, width: size.width, height: size.height)
         p.setFrame(f, display: true, animate: !Motion.reduce)
     }
@@ -78,7 +88,7 @@ final class FloatingPlayerController {
     /// Where it was last put, or the bottom right corner the first time.
     func initialFrame() -> CGRect {
         let screen = visibleFrame()
-        let size = Self.windowSize(compact: model.floatingCompact)
+        let size = Self.windowSize(model.floatingSize)
         if let x = model.defaults.object(forKey: "floatingPlayerX") as? Double, let y = model.defaults.object(forKey: "floatingPlayerY") as? Double {
             var f = CGRect(x: x, y: y, width: size.width, height: size.height)
             // a screen may have been unplugged since: keep it reachable
@@ -94,8 +104,8 @@ final class FloatingPlayerController {
     /// The player was dragged down out of the notch: it appears under the pointer and follows it until the button is let go.
     func tearOff(at mouse: CGPoint = NSEvent.mouseLocation) {
         let p = panel ?? makePanel()
-        compactShown = model.floatingCompact
-        let size = Self.windowSize(compact: compactShown)
+        shownSize = model.floatingSize
+        let size = Self.windowSize(shownSize)
         // the pointer holds it a little below its top edge, in the middle
         let origin = CGPoint(x: mouse.x - size.width / 2, y: mouse.y + 54 - size.height)
         p.setFrame(CGRect(origin: origin, size: size), display: true)
@@ -152,7 +162,7 @@ final class FloatingPlayerController {
     /// The window moved so the visible player sits `snapMargin` from any screen edge it is within `snapDistance` of.
     func snapped(_ frame: CGRect) -> CGRect {
         let screen = visibleFrame()
-        let c = Self.contentSize(compact: compactShown)
+        let c = Self.contentSize(shownSize)
         let inset = CGSize(width: (frame.width - c.width) / 2, height: (frame.height - c.height) / 2)
         let content = frame.insetBy(dx: inset.width, dy: inset.height)
         var f = frame
@@ -204,9 +214,23 @@ struct FloatingPlayerView: View {
     let close: () -> Void
     @State private var scrubbing: Double?
     @State private var hover = false
+    @State private var info: MusicTrackInfo?
+    @State private var controls: MusicControls?
+    @State private var panel: Panel = .none
+    private enum Panel { case none, lyrics, list }
 
-    private var compact: Bool { model.floatingCompact }
+    private var size: NotchModel.FloatingSize { model.floatingSize }
+    private var compact: Bool { size == .compact }
+    private var large: Bool { size == .large }
     private var np_key: Int { model.nowPlaying?.artworkKey ?? 0 }
+
+    /// Changes when the song changes; the large size asks Music about the song then (and only then).
+    private var infoKey: String {
+        guard large, let np = model.nowPlaying, np.bundleID == MusicLibrary.bundleID else { return "off" }
+        return "\(np.title)|\(np.artist)|\(np.duration)"
+    }
+    /// What Music told about this very song (never an earlier song's words).
+    private var songInfo: MusicTrackInfo? { info?.key == infoKey ? info : nil }
 
     private var accent: Color {
         if let np = model.nowPlaying, let art = np.artwork { return ImageColor.dominant(of: art, key: "art\(np.artworkKey)") }
@@ -214,8 +238,8 @@ struct FloatingPlayerView: View {
     }
 
     var body: some View {
-        let size = FloatingPlayerController.contentSize(compact: compact)
-        let shape = RoundedRectangle(cornerRadius: compact ? 22 : 26, style: .continuous)
+        let size = FloatingPlayerController.contentSize(self.size)
+        let shape = RoundedRectangle(cornerRadius: compact ? 22 : (large ? 30 : 26), style: .continuous)
         ZStack {
             // real Liquid Glass, tinted by the cover; the cover's own colours bleed softly through it
             Color.clear.glassEffect(.regular.tint(accent.opacity(0.22)), in: shape)
@@ -228,27 +252,41 @@ struct FloatingPlayerView: View {
                     .allowsHitTesting(false)
                     .id(np.artworkKey).transition(.opacity)
             }
-            if let np = model.nowPlaying { (compact ? AnyView(compactContent(np)) : AnyView(content(np))) }
+            if let np = model.nowPlaying {
+                switch self.size {
+                case .compact: compactContent(np)
+                case .full: content(np)
+                case .large: largeContent(np, size: size)
+                }
+            }
             GlowRim(shape: shape, accent: accent, strength: model.glowLevel.factor * 0.6 * (Motion.lessTransparency ? 0.35 : 1))
         }
         .frame(width: size.width, height: size.height)
         .clipShape(shape)
-        .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
-        .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
+        .shadow(color: .black.opacity(0.20), radius: 14, y: 8)
+        .shadow(color: .black.opacity(0.16), radius: 2.5, y: 1)
         .animation(.easeInOut(duration: 0.5), value: np_key)
         .contentShape(shape)
         .gesture(WindowDragGesture())                    // drag it by any part that is not a button
-        .simultaneousGesture(TapGesture(count: 2).onEnded { withAnimation(Motion.resize) { model.floatingCompact.toggle() } })
+        .simultaneousGesture(TapGesture(count: 2).onEnded { if panel == .none || !large { withAnimation(Motion.resize) { model.nextFloatingSize() } } })
         .contextMenu {
-            Button(compact ? "Full size" : "Compact") { withAnimation(Motion.resize) { model.floatingCompact.toggle() } }
+            Button("Small") { withAnimation(Motion.resize) { model.floatingSize = .compact } }
+            Button("Medium") { withAnimation(Motion.resize) { model.floatingSize = .full } }
+            Button("Large") { withAnimation(Motion.resize) { model.floatingSize = .large } }
+            Divider()
             Button("Put away", action: close)
         }
-        .overlay(alignment: .topLeading) { closeBadge }
-        .frame(width: FloatingPlayerController.windowSize(compact: compact).width, height: FloatingPlayerController.windowSize(compact: compact).height)
+        .frame(width: FloatingPlayerController.windowSize(self.size).width, height: FloatingPlayerController.windowSize(self.size).height)
         .environment(\.colorScheme, .dark)
         .onHover { hover = $0 }
+        .task(id: infoKey) {
+            guard infoKey != "off" else { info = nil; return }
+            controls = await MusicLibrary.controls()
+            info = await MusicLibrary.fetch(key: infoKey)
+        }
         .animation(Motion.hover, value: hover)
-        .animation(Motion.resize, value: compact)
+        .animation(.easeInOut(duration: 0.3), value: hover)
+        .animation(Motion.resize, value: size)
     }
 
     private func artwork(_ np: NowPlayingInfo, side: CGFloat, radius: CGFloat) -> some View {
@@ -283,23 +321,8 @@ struct FloatingPlayerView: View {
         .buttonStyle(.plain).accessibilityLabel(np.playing ? "Pause" : "Play")
     }
 
-    /// One small dot on the top left corner, only while the pointer is over the player, like a widget's remove badge.
-    /// Nothing else sits on top of the controls.
-    private var closeBadge: some View {
-        Button(action: close) {
-            Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(.white.opacity(0.85))
-                .frame(width: 18, height: 18)
-                .glassEffect(.regular.interactive(), in: Circle())
-        }
-        .buttonStyle(.plain)
-        .opacity(hover ? 1 : 0)
-        .scaleEffect(hover ? 1 : 0.6)
-        .offset(x: -6, y: -6)
-        .accessibilityLabel("Put the floating player away")
-    }
-
-    private func transportButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol).font(.system(size: 13, weight: .semibold)).frame(width: 30, height: 30).contentShape(Rectangle()) }
+    private func transportButton(_ symbol: String, label: String, side: CGFloat = 30, icon: CGFloat = 13, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: symbol).font(.system(size: icon, weight: .semibold)).frame(width: side, height: side).contentShape(Rectangle()) }
             .buttonStyle(.plain).foregroundStyle(.white.opacity(0.9)).hoverLift(1.12).accessibilityLabel(label)
     }
 
@@ -341,6 +364,139 @@ struct FloatingPlayerView: View {
             progress(np)
         }
         .padding(.horizontal, 16).padding(.vertical, 14)
+    }
+
+    /// The cover fills the top and melts into its own colours below; the words, the progress line and the three
+    /// buttons sit on that. Nothing more: no stars, no lyrics, no queue.
+    private func largeContent(_ np: NowPlayingInfo, size: CGSize) -> some View {
+        // Away from it, nothing but the cover (filling the card) and a thin line for the time; the pointer brings the rest back.
+        let chrome = hover
+        let panelOpen = panel != .none
+        return ZStack(alignment: .top) {
+            Group {
+                if let img = np.artwork {
+                    ZStack {
+                        Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                        // under words or a list: a ready-made, lightly blurred, darker copy fades in (no live blur while animating)
+                        Image(nsImage: ArtImages.scaled(img, side: 160, blur: 2.5, key: "soft\(np.artworkKey)"))
+                            .resizable().aspectRatio(contentMode: .fill)
+                            .overlay(Color.black.opacity(0.38))
+                            .opacity(panelOpen ? 1 : 0)
+                    }
+                } else {
+                    ZStack {
+                        LinearGradient(colors: [Theme.violet.opacity(0.6), Theme.blue.opacity(0.5)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                        Image(systemName: "music.note").font(.system(size: 60)).foregroundStyle(.white.opacity(0.85))
+                    }
+                }
+            }
+            .frame(width: size.width, height: chrome ? size.width : size.height)
+            .clipped()
+            .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: chrome ? 0.62 : 1),
+                                         .init(color: chrome ? .clear : .black, location: 1)],
+                                 startPoint: .top, endPoint: .bottom))
+            .animation(.easeInOut(duration: 0.35), value: panelOpen)
+            .id(np.artworkKey).transition(.opacity)
+            .scaleEffect(np.playing ? 1 : 0.97)
+            .animation(Motion.resize, value: np.playing)
+
+            // the words or the list: ONE view that never rebuilds and always fills the card; it only glides (the line it centres on
+            // moves up when the controls come in) while the controls fade, so nothing jumps
+            if let si = songInfo, panel == .lyrics, !si.lyrics.isEmpty {
+                LyricsView(lines: si.lyrics, now: { np.elapsedNow() }, accent: accent, anchorY: chrome ? 0.3 : 0.5, fadeAt: chrome ? 0.56 : 1)
+                    .frame(width: size.width, height: size.height)
+                    .transition(.opacity)
+            } else if let si = songInfo, panel == .list, !si.tracks.isEmpty {
+                TrackListView(tracks: si.tracks, currentID: si.currentID, accent: accent, isPlaying: np.playing, cover: np.artwork.map { ArtImages.scaled($0, side: 76, key: "thumb\(np.artworkKey)") },
+                              anchorY: chrome ? 0.3 : 0.5, fadeAt: chrome ? 0.56 : 1) { MusicLibrary.play(id: $0.id) }
+                    .frame(width: size.width, height: size.height)
+                    .transition(.opacity)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Spacer(minLength: 0)
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        MarqueeText(text: np.title, font: Theme.title(17), height: 23)
+                        Text([np.artist, np.album].filter { !$0.isEmpty }.joined(separator: " · "))
+                            .font(Theme.text(12.5)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .compositingGroup()
+                    .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.86), .init(color: .clear, location: 1)],
+                                         startPoint: .leading, endPoint: .trailing))
+                    if let c = controls { MediaSwitches(controls: c, accent: accent, size: 28) { controls = $0 } }
+                }
+                progress(np)
+                GlassEffectContainer(spacing: 14) {
+                    HStack(spacing: 12) {
+                        panelButton(.lyrics, symbol: "quote.bubble", label: "Lyrics", available: songInfo?.lyrics.isEmpty == false)
+                        transportButton("backward.fill", label: "Previous track", side: 40, icon: 19) { model.sendMedia(.previous) }
+                        playButton(np, side: 58)
+                        transportButton("forward.fill", label: "Next track", side: 40, icon: 19) { model.sendMedia(.next) }
+                        panelButton(.list, symbol: "list.bullet", label: "Songs on this album", available: songInfo?.tracks.isEmpty == false)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(.horizontal, 20).padding(.bottom, 18)
+            .opacity(chrome ? 1 : 0)
+            .allowsHitTesting(chrome)
+
+            idleLine(np, size: size, onDark: panelOpen).opacity(chrome ? 0 : 1)
+
+        }
+        .frame(width: size.width, height: size.height)
+        .background {
+            // the cover's colours, blurred, behind the lower part
+            if let np = model.nowPlaying, let art = np.artwork {
+                Image(nsImage: AmbientArt.image(for: art, key: "amb\(np.artworkKey)"))
+                    .resizable().scaledToFill().saturation(1.5).opacity(0.85)
+                    .overlay(Color.black.opacity(0.45))
+            } else { Color.black.opacity(0.6) }
+        }
+    }
+
+    /// The only thing besides the cover while you are away: a thin line showing how far the song is.
+    private func idleLine(_ np: NowPlayingInfo, size: CGSize, onDark: Bool) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            let total = max(np.duration, 0)
+            let fraction = total > 0 ? min(max(np.elapsedNow(ctx.date) / total, 0), 1) : 0
+            // dark on a light cover, white on a dark one
+            let light = !onDark && (np.artwork.map { ImageColor.bottomIsLight(of: $0, key: "bot\(np.artworkKey)") } ?? false)
+            let ink: Color = light ? .black : .white
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(ink.opacity(light ? 0.22 : 0.28))
+                    Capsule().fill(ink.opacity(light ? 0.78 : 0.95)).frame(width: g.size.width * fraction)
+                }
+                .frame(height: 3)
+                .shadow(color: (light ? Color.white : Color.black).opacity(0.4), radius: 2, y: 0.5)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+            }
+            .padding(.horizontal, 22).padding(.bottom, 16)
+            .allowsHitTesting(false)
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    /// A small round button for the words or the list; only there when Music has them for this song.
+    @ViewBuilder
+    private func panelButton(_ which: Panel, symbol: String, label: String, available: Bool) -> some View {
+        if available {
+            let on = panel == which
+            Button { withAnimation(.easeInOut(duration: 0.25)) { panel = on ? .none : which } } label: {
+                Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(on ? Color.white : Color.white.opacity(0.62))
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Color.white.opacity(on ? 0.2 : 0)))
+                    .animation(.easeInOut(duration: 0.2), value: on)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain).hoverLift(1.08).accessibilityLabel(label)
+        } else {
+            Color.clear.frame(width: 34, height: 34)
+        }
     }
 
     private func progress(_ np: NowPlayingInfo) -> some View {

@@ -61,6 +61,17 @@ enum Translator {
 
     static func name(_ id: String) -> String { languages.first { $0.id == id }?.name ?? id }
 
+    /// The few languages worth showing first: this Mac's own languages, English, then common ones, at most `limit`.
+    static func favourites(from ids: [String], preferred: [String] = Locale.preferredLanguages, limit: Int = 6) -> [String] {
+        var out: [String] = []
+        let own = preferred.map { String($0.prefix { $0 != "-" && $0 != "_" }).lowercased() }
+        for id in own + ["en", "es", "fr", "de", "ar", "zh"] where ids.contains(id) && !out.contains(id) {
+            out.append(id)
+            if out.count == limit { break }
+        }
+        return out
+    }
+
     struct NotInstalled: LocalizedError {
         var language: String
         var errorDescription: String? {

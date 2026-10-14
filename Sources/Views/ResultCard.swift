@@ -4,6 +4,7 @@ import AppKit
 /// What a file action produced (or why it failed).
 struct ResultCard: View {
     @ObservedObject var model: NotchModel
+    let geometry: NotchGeometry
     let outcome: NotchModel.Outcome2
 
     var body: some View {
@@ -13,24 +14,32 @@ struct ResultCard: View {
         }
     }
 
+    /// Beside the notch: a coloured mark and a word on the left, the close button on the right.
+    private func top(symbol: String, word: String, color: Color) -> some View {
+        BesideNotch(geometry: geometry, cardWidth: NotchGeometry.resultWidth) {
+            ZStack {
+                Circle().fill(color.opacity(0.2)).frame(width: 18, height: 18)
+                Image(systemName: symbol).font(.system(size: 9, weight: .heavy)).foregroundStyle(color)
+            }
+            .shadow(color: color.opacity(0.6), radius: 6)
+            Text(word).font(.system(size: 9.5, weight: .bold, design: .rounded)).tracking(0.6).foregroundStyle(color)
+        } trailing: {
+            Button { model.dismissOutcome() } label: { Image(systemName: "xmark") }
+                .buttonStyle(RoundIconButtonStyle()).accessibilityLabel("Dismiss")
+        }
+    }
+
     private func done(_ result: ActionResult, _ source: String) -> some View {
         VStack(alignment: .leading, spacing: 9) {
+            top(symbol: "sparkles", word: "DONE", color: Theme.green).rise(0)
             HStack(spacing: 12) {
-                ZStack {
-                    Circle().fill(Theme.green.opacity(0.18)).frame(width: 36, height: 36)
-                    Image(systemName: "sparkles").font(.system(size: 15, weight: .bold)).foregroundStyle(Theme.green)
-                }
-                .shadow(color: Theme.green.opacity(0.5), radius: 8)
-                .rise(0)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(result.title).font(Theme.title(14)).lineLimit(1)
+                    Text(result.title).font(Theme.title(15)).lineLimit(1)
                     Text(source + (result.files.count > 1 ? "  ·  \(result.files.count) files saved" : "  ·  saved next to it"))
                         .font(Theme.label(11)).foregroundStyle(Theme.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 .rise(1)
                 Spacer(minLength: 4)
-                Button { model.dismissOutcome() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(RoundIconButtonStyle()).accessibilityLabel("Dismiss")
             }
             if let text = result.text, !text.isEmpty {
                 Text(text)
@@ -62,19 +71,10 @@ struct ResultCard: View {
 
     private func failed(_ message: String, _ source: String) -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle().fill(Theme.red.opacity(0.18)).frame(width: 36, height: 36)
-                    Image(systemName: "exclamationmark").font(.system(size: 16, weight: .heavy)).foregroundStyle(Theme.red)
-                }
-                .shadow(color: Theme.red.opacity(0.5), radius: 8)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Could not finish").font(Theme.title(14))
-                    Text(source).font(Theme.label(11)).foregroundStyle(Theme.secondary).lineLimit(1).truncationMode(.middle)
-                }
-                Spacer(minLength: 4)
-                Button { model.dismissOutcome() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(RoundIconButtonStyle()).accessibilityLabel("Dismiss")
+            top(symbol: "exclamationmark", word: "FAILED", color: Theme.red)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Could not finish").font(Theme.title(15))
+                Text(source).font(Theme.label(11)).foregroundStyle(Theme.secondary).lineLimit(1).truncationMode(.middle)
             }
             Text(message).font(Theme.text(12)).foregroundStyle(.white.opacity(0.85)).lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)

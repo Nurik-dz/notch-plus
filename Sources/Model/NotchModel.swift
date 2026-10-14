@@ -11,7 +11,13 @@ struct ApprovalRequest: Identifiable {
     let branch: String?
     let risk: Risk
     let suggestions: [[String: Any]]
+    /// The tool's input as Claude sent it (echoed back when answering Claude's questions).
+    var input: [String: Any] = [:]
     let receivedAt = Date()
+
+    /// Claude asking you something (its AskUserQuestion tool) instead of asking to run something.
+    var questions: [ClaudeQuestion] { tool == "AskUserQuestion" ? ClaudeQuestion.parse(input) : [] }
+    var isQuestion: Bool { !questions.isEmpty }
 
     var folderName: String { cwd.isEmpty ? "" : (cwd as NSString).lastPathComponent }
     /// "Allow Always" only when Claude suggested a rule and the request is not risky.
@@ -112,14 +118,19 @@ final class NotchModel: ObservableObject {
     var explain: ((ApprovalRequest) async -> String?)?
     var focusIsOn: () -> Bool = { false }
 
+    /// The island glows brighter for a moment: Claude has waited long for an answer.
+    @Published var pulsing = false
+    private var lastPulse = Date.distantPast
     private var flashTask: Task<Void, Never>?
     private var hudTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
+    /// Notification cards waiting for the one on screen to close, with how long each stays.
+    @Published private var toastQueue: [(note: CapturedNotification, seconds: Double)] = []
     private var finishedTask: Task<Void, Never>?
     private var clock: Timer?
 
     // Home: the player and the shelf
-    enum HomeTab: Hashable { case player, shelf }
+    enum HomeTab: Hashable { case player, shelf, recent }
     @Published var nowPlaying: NowPlayingInfo?
     @Published var homeChoice: HomeTab?           // what you picked yourself; nil = automatic
     @Published var dragging = false               // a file drag is near the notch
@@ -148,7 +159,7 @@ final class NotchModel: ObservableObject {
     /// The player when something is playing, otherwise the shelf, unless you chose a tab.
     var homeTab: HomeTab {
         if dragging || dropTargeted { return .shelf }
-        if let c = homeChoice { return c }
+        if let c = homeChoice, c != .recent || !notifications.isEmpty { return c }
         return nowPlaying?.isMeaningful == true ? .player : .shelf     // paused is still the player, so play can be pressed again
     }
 
@@ -159,14 +170,65 @@ final class NotchModel: ObservableObject {
     /// Music is playing and the user wants it beside the notch.
     var musicWingsOn: Bool { showMusicBesideNotch && nowPlaying?.isMeaningful == true && nowPlaying?.playing == true }
 
-    /// Beside the notch: roomy for Claude and answers, slim for music.
+    /// Beside the notch: each wing only as wide as what it shows (Claude's tool and timer need the most).
     var wingsWidth: CGFloat {
-        (hud != nil || flash != nil || liveSession != nil || !jobs.isEmpty) ? NotchGeometry.wingWidth : 60
+        if hud != nil || flash != nil { return 90 }
+        if liveSession != nil { return NotchGeometry.wingWidth }
+        if !jobs.isEmpty { return 60 }
+        if songPeek != nil, musicWingsOn { return 195 }
+        return 50
+    }
+
+    /// Music keeps playing while something else is beside the notch: it moves into a small black drop
+    /// that splits off the island's right end (like the iPhone's second Live Activity).
+    var musicBubble: Bool {
+        musicWingsOn && state == .wings && (hud != nil || flash != nil || liveSession != nil || !jobs.isEmpty)
+    }
+
+    /// The new song's title and artist, shown beside the notch for a moment after the song changes.
+    struct SongPeek: Equatable { let title: String; let artist: String }
+    @Published var songPeek: SongPeek?
+    private var songPeekTask: Task<Void, Never>?
+
+    var showSongPeek: Bool {
+        get { defaults.object(forKey: "songPeek") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "songPeek"); if !newValue { songPeek = nil }; objectWillChange.send() }
+    }
+    /// A two-finger swipe left or right over the closed notch skips to the next or the previous song.
+    var swipeSkips: Bool {
+        get { defaults.object(forKey: "swipeSkips") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "swipeSkips"); objectWillChange.send() }
+    }
+    private var lastSwipeSkip = Date.distantPast
+    func rewindSwipeClockForTests() { lastSwipeSkip = .distantPast }
+    /// Swipe right for the next song, left for the previous one. It works on the closed notch and on the open player
+    /// (pointing at the notch opens it within a third of a second, so that is where the swipe really happens);
+    /// never on the shelf or on a card, where a sideways swipe means nothing.
+    func skipBySwipe(next: Bool) {
+        guard swipeSkips, nowPlaying?.isMeaningful == true, asking == nil, replying == nil else { return }
+        let onPlayer = state == .overview && homeTab == .player
+        guard !hovering || onPlayer else { return }
+        guard Date().timeIntervalSince(lastSwipeSkip) > 0.5 else { return }      // one swipe, one song
+        lastSwipeSkip = Date()
+        sendMedia(next ? .next : .previous)
+    }
+
+    private func peekIfSongChanged(from old: NowPlayingInfo?, to new: NowPlayingInfo?) {
+        guard showSongPeek, showMusicBesideNotch, let old, old.isMeaningful, let new, new.isMeaningful, new.playing,
+              old.title != new.title || old.artist != new.artist else { return }
+        songPeek = SongPeek(title: new.title, artist: new.artist)
+        songPeekTask?.cancel()
+        songPeekTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            guard !Task.isCancelled else { return }
+            self?.songPeek = nil
+        }
     }
 
     func setNowPlaying(_ info: NowPlayingInfo?) {
         let wasPlaying = nowPlaying?.playing == true
         let wasThere = nowPlaying?.isMeaningful == true
+        peekIfSongChanged(from: nowPlaying, to: info)
         nowPlaying = info
         // a fresh start, or the player going away, hands the home view back to automatic (pausing does not)
         if info?.playing == true, !wasPlaying { homeChoice = nil }
@@ -181,10 +243,29 @@ final class NotchModel: ObservableObject {
         set { defaults.set(newValue, forKey: "floatingPlayerOn"); objectWillChange.send() }
     }
 
-    /// The small version: cover, title and play only.
+    enum FloatingSize: Int { case compact, full, large }
+
+    /// Small (cover, title, play), medium (adds skip and the progress line) or large (the cover fills the card).
+    /// A double click steps to the next one and the third goes back to small. Small until you choose.
+    var floatingSize: FloatingSize {
+        get {
+            if let v = defaults.object(forKey: "floatingSize") as? Int, let s = FloatingSize(rawValue: v) { return s }
+            if let old = defaults.object(forKey: "floatingCompact") as? Bool { return old ? .compact : .full }   // from before there were three
+            return .compact
+        }
+        set { defaults.set(newValue.rawValue, forKey: "floatingSize"); objectWillChange.send() }
+    }
+    func nextFloatingSize() {
+        switch floatingSize {
+        case .compact: floatingSize = .full
+        case .full: floatingSize = .large
+        case .large: floatingSize = .compact
+        }
+    }
+    /// The two-way view of the size that older code and tests use.
     var floatingCompact: Bool {
-        get { defaults.object(forKey: "floatingCompact") as? Bool ?? false }
-        set { defaults.set(newValue, forKey: "floatingCompact"); objectWillChange.send() }
+        get { floatingSize == .compact }
+        set { floatingSize = newValue ? .compact : .full }
     }
 
     /// Set by the floating player: pulls it out of the notch and onto the pointer.
@@ -362,6 +443,18 @@ final class NotchModel: ObservableObject {
         set { defaults.set(newValue.rawValue, forKey: "glowLevel"); objectWillChange.send() }
     }
 
+    /// What the open island is made of: black like the hardware notch (the default), or Liquid Glass.
+    enum IslandStyle: String, CaseIterable, Identifiable {
+        case black, glass
+        var id: String { rawValue }
+        var title: String { self == .black ? "Black" : "Liquid Glass" }
+    }
+
+    var islandStyle: IslandStyle {
+        get { IslandStyle(rawValue: defaults.string(forKey: "islandStyle") ?? "") ?? .black }
+        set { defaults.set(newValue.rawValue, forKey: "islandStyle"); objectWillChange.send() }
+    }
+
     // MARK: - Caffeine
 
     let caffeine = Caffeine()
@@ -488,6 +581,9 @@ final class NotchModel: ObservableObject {
     func dropFiles(_ urls: [URL]) -> Bool {
         let n = add(urls, to: shelf)
         homeChoice = .shelf
+        // the files were dropped on the open shelf: it stays open (the usual close rules apply once the pointer leaves),
+        // so you can act on the file at once instead of pointing at the notch again
+        if n > 0 { hovering = true }
         return n > 0
     }
 
@@ -502,6 +598,7 @@ final class NotchModel: ObservableObject {
 
     private func refreshClock() {
         tick = Date()
+        nudgePulse()
         pruneShelf()
         let cutoff = Date().addingTimeInterval(-3600)
         sessions = sessions.filter { $0.value.lastEvent > cutoff }
@@ -513,10 +610,48 @@ final class NotchModel: ObservableObject {
         get { defaults.object(forKey: "sortWithAI") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "sortWithAI"); objectWillChange.send() }
     }
+
+    /// What a notification card says: the message as sent (the default), or Apple Intelligence's short summary.
+    enum NotificationText: String, CaseIterable, Identifiable {
+        case full, summary
+        var id: String { rawValue }
+        var title: String { self == .full ? "Full message" : "Short summary" }
+    }
+
+    /// Messages shorter than this are always shown word for word: a summary would not be shorter.
+    static let summaryMinLength = 110
+
+    var notificationText: NotificationText {
+        get { NotificationText(rawValue: defaults.string(forKey: "notificationText") ?? "") ?? .full }
+        set { defaults.set(newValue.rawValue, forKey: "notificationText"); objectWillChange.send() }
+    }
     var respectFocus: Bool {
         get { defaults.object(forKey: "respectFocus") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "respectFocus"); objectWillChange.send() }
     }
+    /// Minutes Claude may wait for an answer before the island reminds you; 0 switches the reminder off.
+    var nudgeAfterMinutes: Int {
+        get { defaults.object(forKey: "nudgeAfterMinutes") as? Int ?? 3 }
+        set { defaults.set(min(max(newValue, 0), 30), forKey: "nudgeAfterMinutes"); objectWillChange.send() }
+    }
+    /// True once the first waiting approval or question is older than the chosen time.
+    func isNudging(at now: Date = Date()) -> Bool {
+        guard nudgeAfterMinutes > 0, let first = pending.first else { return false }
+        return now.timeIntervalSince(first.request.receivedAt) >= Double(nudgeAfterMinutes) * 60
+    }
+    /// One calm pulse of the edge light. `force` is for coming back to the Mac, otherwise at most one every 30 s.
+    func nudgePulse(force: Bool = false, at now: Date = Date()) {
+        guard isNudging(at: now), force || now.timeIntervalSince(lastPulse) >= 30 else { return }
+        lastPulse = now
+        pulsing = true
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            self?.pulsing = false
+        }
+    }
+    /// The Mac woke up or was unlocked: if Claude is still waiting, draw the eye to it.
+    func macReturned() { nudgePulse(force: true) }
+
     /// Claude finishing something quick is not worth a card; long tasks are.
     var finishedCardAfter: TimeInterval { 15 }
 
@@ -525,6 +660,13 @@ final class NotchModel: ObservableObject {
     var current: Pending? { pending.first }
 
     var liveCount: Int { sessions.values.filter(\.isLive).count }
+
+    /// From the "Claude finished" card: brings Claude's terminal tab to the front and closes the card.
+    func goToTerminal(_ f: ClaudeFinish) {
+        guard let t = f.terminal else { return }
+        dismissFinished()
+        TerminalJump.focus(t)
+    }
 
     var liveSession: ClaudeSession? {
         sessions.values.filter(\.isLive).max { $0.lastEvent < $1.lastEvent }
@@ -546,18 +688,67 @@ final class NotchModel: ObservableObject {
     func handle(json: [String: Any], connection: HookConnection) {
         let tool = json["tool_name"] as? String ?? "a tool"
         let input = json["tool_input"] as? [String: Any] ?? [:]
-        let cwd = json["cwd"] as? String ?? ""
+        let cwd = Self.projectDir(json)
         let d = RequestDescriber.describe(tool: tool, input: input)
-        let request = ApprovalRequest(
+        var request = ApprovalRequest(
             sessionID: json["session_id"] as? String ?? "unknown",
             tool: tool, headline: d.headline, detail: d.detail,
             cwd: cwd, branch: GitBranch.read(from: cwd), risk: d.risk,
             suggestions: json["permission_suggestions"] as? [[String: Any]] ?? [])
+        request.input = input
         pending.append(Pending(request: request, connection: connection))
+        noteTerminal(request.sessionID, cwd: cwd, json)
         touchSession(request.sessionID, cwd: cwd) { $0.status = .waiting }
         let id = request.id
         connection.onClose = { [weak self] in self?.dismiss(id: id) }
-        requestExplanation(for: request)
+        if !request.isQuestion { requestExplanation(for: request) }     // a question explains itself
+    }
+
+    // MARK: - Claude's own questions
+
+    /// The options picked so far on the question card on screen, by question text.
+    @Published var questionPicks: [String: [String]] = [:]
+
+    func pick(_ option: ClaudeQuestion.Option, in q: ClaudeQuestion) {
+        var chosen = questionPicks[q.question] ?? []
+        if q.multiSelect {
+            if let i = chosen.firstIndex(of: option.label) { chosen.remove(at: i) } else { chosen.append(option.label) }
+        } else {
+            chosen = [option.label]
+        }
+        questionPicks[q.question] = chosen
+    }
+
+    /// Every question has at least one pick.
+    var questionsAnswered: Bool {
+        guard let qs = current?.request.questions, !qs.isEmpty else { return false }
+        return qs.allSatisfy { !(questionPicks[$0.question] ?? []).isEmpty }
+    }
+
+    /// Sends the picks to Claude as its question tool's answers.
+    func answerQuestions() {
+        guard let item = pending.first, item.request.isQuestion, questionsAnswered else { return }
+        pending.removeFirst()
+        let r = item.request
+        let updated = ClaudeQuestion.updatedInput(original: r.input, questions: r.questions, picks: questionPicks)
+        let body: [String: Any] = ["hookSpecificOutput": ["hookEventName": "PermissionRequest",
+                                                          "decision": ["behavior": "allow", "updatedInput": updated]]]
+        let data = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        item.connection.reply(String(decoding: data, as: UTF8.self))
+        questionPicks = [:]
+        record(r, .allowed)
+        touchSession(r.sessionID, cwd: r.cwd) { $0.status = .working }
+        if pending.isEmpty && !hovering { showFlash(Flash(symbol: "checkmark", text: "Answered", good: true)) }
+    }
+
+    /// Gives the question back to the terminal: Notch+ answers nothing, so Claude Code asks there as usual.
+    func answerQuestionsInTerminal() {
+        guard let item = pending.first, item.request.isQuestion else { return }
+        pending.removeFirst()
+        item.connection.reply("{}")
+        questionPicks = [:]
+        record(item.request, .answeredElsewhere)
+        touchSession(item.request.sessionID, cwd: item.request.cwd) { $0.status = .waiting }
     }
 
     private func requestExplanation(for request: ApprovalRequest) {
@@ -575,6 +766,11 @@ final class NotchModel: ObservableObject {
 
     func answer(allow: Bool, always: Bool = false) {
         guard let item = pending.first else { return }
+        // a question is not a yes or no: the keyboard shortcuts send the picks, or hand it to the terminal
+        if item.request.isQuestion {
+            if allow { answerQuestions() } else { answerQuestionsInTerminal() }
+            return
+        }
         pending.removeFirst()
         let r = item.request
         var decision: [String: Any]
@@ -601,10 +797,27 @@ final class NotchModel: ObservableObject {
     /// The hook went away (answered in the terminal, or Claude stopped).
     func dismiss(id: UUID) {
         guard let i = pending.firstIndex(where: { $0.request.id == id }) else { return }
+        if i == 0 { questionPicks = [:] }
         let r = pending.remove(at: i).request
         record(r, .answeredElsewhere)
         touchSession(r.sessionID, cwd: r.cwd) { $0.status = .working }
         explanations.removeValue(forKey: r.id)
+    }
+
+    /// Claude Code does not hang up the hook when you answer in the terminal, but it does report that the tool
+    /// finished (or that the turn moved on). Then the waiting card is stale: close it and let the hook end.
+    /// With a tool name only the matching request goes; without one, every waiting request of that session.
+    func settleElsewhere(session: String, tool: String?, input: [String: Any]?) {
+        let matches = pending.filter { $0.request.sessionID == session && (tool == nil || $0.request.tool == tool) }
+        var chosen = matches
+        if tool != nil {
+            let exact = matches.first { input != nil && NSDictionary(dictionary: $0.request.input).isEqual(to: input!) }
+            chosen = [exact ?? matches.first].compactMap { $0 }
+        }
+        for m in chosen {
+            m.connection.reply("{}")
+            dismiss(id: m.request.id)
+        }
     }
 
     private func record(_ r: ApprovalRequest, _ outcome: Outcome) {
@@ -650,6 +863,17 @@ final class NotchModel: ObservableObject {
 
     // MARK: - Claude Code: live status from hook events
 
+    /// The session's project folder (Claude Code's own, sent by the hook script), else the folder it is in now.
+    static func projectDir(_ json: [String: Any]) -> String {
+        (json["_notch_project_dir"] as? String) ?? (json["cwd"] as? String ?? "")
+    }
+
+    /// Remembers which terminal a session runs in, to jump back to it from the sessions list.
+    private func noteTerminal(_ id: String, cwd: String, _ json: [String: Any]) {
+        guard let t = TerminalRef(json), sessions[id]?.terminal != t else { return }
+        touchSession(id, cwd: cwd) { $0.terminal = t }
+    }
+
     private func touchSession(_ id: String, cwd: String, _ change: (inout ClaudeSession) -> Void) {
         var s = sessions[id] ?? ClaudeSession(id: id, cwd: cwd)
         if !cwd.isEmpty, cwd != s.cwd || s.branch == nil { s.cwd = cwd; s.branch = GitBranch.read(from: cwd) }
@@ -661,11 +885,13 @@ final class NotchModel: ObservableObject {
     func handleEvent(_ json: [String: Any]) {
         guard let name = json["hook_event_name"] as? String else { return }
         let id = json["session_id"] as? String ?? "unknown"
-        let cwd = json["cwd"] as? String ?? ""
+        let cwd = Self.projectDir(json)
+        noteTerminal(id, cwd: cwd, json)
         switch name {
         case "SessionStart":
             touchSession(id, cwd: cwd) { $0.status = .idle; $0.tool = nil }
         case "UserPromptSubmit":
+            settleElsewhere(session: id, tool: nil, input: nil)
             touchSession(id, cwd: cwd) { $0.status = .working; $0.tool = nil; $0.turnStart = Date() }
         case "PreToolUse":
             let tool = json["tool_name"] as? String
@@ -674,6 +900,7 @@ final class NotchModel: ObservableObject {
                 if $0.turnStart == nil { $0.turnStart = Date() }
             }
         case "PostToolUse":
+            settleElsewhere(session: id, tool: json["tool_name"] as? String, input: json["tool_input"] as? [String: Any])
             touchSession(id, cwd: cwd) { $0.status = .working; $0.tool = nil }
         case "Notification":
             let kind = json["notification_type"] as? String ?? ""
@@ -681,22 +908,26 @@ final class NotchModel: ObservableObject {
                 touchSession(id, cwd: cwd) { $0.status = .waiting }
             }
         case "Stop":
+            settleElsewhere(session: id, tool: nil, input: nil)
             var duration: TimeInterval?
             var project = ""
             var branch: String?
+            var terminal: TerminalRef?
             touchSession(id, cwd: cwd) {
                 if let t = $0.turnStart { duration = Date().timeIntervalSince(t) }
                 $0.status = .done; $0.tool = nil; $0.turnStart = nil
-                project = $0.project; branch = $0.branch
+                $0.lastReply = Self.replyPreview(json["last_assistant_message"] as? String)
+                project = $0.project; branch = $0.branch; terminal = $0.terminal
             }
             let finish = ClaudeFinish(project: project, branch: branch, duration: duration,
-                                      message: Self.firstSentence(json["last_assistant_message"] as? String))
+                                      message: Self.firstSentence(json["last_assistant_message"] as? String), terminal: terminal)
             finishedLog.insert(finish, at: 0)
             if finishedLog.count > 10 { finishedLog.removeLast(finishedLog.count - 10) }
             if (duration ?? 0) >= finishedCardAfter {
                 showFinished(finish)
             }
         case "SessionEnd":
+            settleElsewhere(session: id, tool: nil, input: nil)
             sessions.removeValue(forKey: id)
         default:
             break
@@ -717,6 +948,13 @@ final class NotchModel: ObservableObject {
         finished = nil
     }
 
+    /// The start of Claude's answer on one line, for the sessions list.
+    static func replyPreview(_ text: String?) -> String? {
+        guard let t = text?.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "`", with: "").trimmingCharacters(in: .whitespaces), !t.isEmpty else { return nil }
+        return t.count > 220 ? String(t.prefix(217)) + "..." : t
+    }
+
     static func firstSentence(_ text: String?) -> String? {
         guard var t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
         t = t.replacingOccurrences(of: "\n", with: " ")
@@ -728,55 +966,185 @@ final class NotchModel: ObservableObject {
 
     // MARK: - Notifications from other apps
 
-    /// New notifications from the database, oldest first. Applies the per-app choices,
-    /// Focus, and (when switched on) Apple Intelligence sorting.
+    /// New notifications from the database, oldest first. Every app shows unless its choice in Settings
+    /// says otherwise (or a Focus is on and Notch+ respects it). Apple Intelligence never decides what
+    /// shows: the card opens at once, and its label and one-line summary are added when they are ready.
+    /// Show Messages as soon as they arrive (read from Messages' own database) instead of when macOS stores the notification.
+    var instantMessages: Bool {
+        get { defaults.object(forKey: "instantMessages") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "instantMessages"); objectWillChange.send() }
+    }
+    private var shownGuids: [String] = []
+    private var shownGuidSet = Set<String>()
+
     func receive(_ items: [RawNotification]) {
         for raw in items {
             let name = AppLookup.name(for: raw.bundleID)
-            if raw.bundleID != NotificationRules.ownBundleID {
+            if !NotificationRules.isOwn(raw.bundleID) {
                 var seen = rules.seenApps
                 if seen[raw.bundleID] != name { seen[raw.bundleID] = name; rules.seenApps = seen }
             }
             var mode = rules.mode(for: raw.bundleID)
             guard mode != .ignore else { continue }
             if mode == .show, respectFocus, focusIsOn() { mode = .quiet }
+            // the same message can arrive twice (at once from Messages' database, then as macOS's notification record): show it once
+            if let g = raw.guid {
+                if shownGuidSet.contains(g) { continue }
+                shownGuidSet.insert(g); shownGuids.append(g)
+                if shownGuids.count > 300 { shownGuidSet.remove(shownGuids.removeFirst()) }
+            }
 
             let note = CapturedNotification(raw: raw, appName: name)
-            if mode == .show, sortWithAppleIntelligence, let triage {
+            notifications.insert(note, at: 0)
+            if notifications.count > 30 { notifications.removeLast(notifications.count - 30) }
+            if mode == .show { showToast(note) } else { quietUnseen += 1 }
+            let wantsSummary = notificationText == .summary && (note.detail?.count ?? 0) >= Self.summaryMinLength
+            if sortWithAppleIntelligence || wantsSummary, let triage {
                 Task { [weak self] in
                     let result = await triage(raw)
-                    await MainActor.run { self?.accept(note, mode: mode, triage: result) }
+                    await MainActor.run { self?.label(note.id, with: result) }
                 }
-            } else {
-                accept(note, mode: mode, triage: nil)
             }
         }
     }
 
-    private func accept(_ note: CapturedNotification, mode: NotificationMode, triage: TriageResult?) {
-        var n = note
-        n.priority = triage?.priority
-        n.summary = triage?.summary
-        notifications.insert(n, at: 0)
-        if notifications.count > 30 { notifications.removeLast(notifications.count - 30) }
-        var show = mode == .show
-        if show, triage?.priority == .noise { show = false }      // sorted out as noise: kept, not shown
-        if show { showToast(n) }
+    /// Adds Apple Intelligence's label and summary to a notification already in the list (and on screen).
+    private func label(_ id: UUID, with triage: TriageResult?) {
+        guard let triage else { return }
+        let priority = sortWithAppleIntelligence ? triage.priority : nil
+        let summary = notificationText == .summary ? triage.summary : nil
+        if let i = notifications.firstIndex(where: { $0.id == id }) {
+            notifications[i].priority = priority
+            notifications[i].summary = summary
+        }
+        if toast?.id == id {
+            toast?.priority = priority
+            toast?.summary = summary
+        }
+        if let q = toastQueue.firstIndex(where: { $0.note.id == id }) {
+            toastQueue[q].note.priority = priority
+            toastQueue[q].note.summary = summary
+        }
     }
 
+    /// Shows a notification card. If one is already on screen, the new one waits its turn (nothing is
+    /// lost when two arrive together); the card says how many are waiting.
     func showToast(_ n: CapturedNotification, seconds: Double = 6) {
+        if toast != nil {
+            toastQueue.append((n, seconds))
+            return
+        }
+        present(n, seconds: seconds)
+    }
+
+    private func present(_ n: CapturedNotification, seconds: Double) {
         toast = n
         toastTask?.cancel()
         toastTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
-            if !Task.isCancelled { self?.toast = nil }
+            if !Task.isCancelled { self?.dismissToast() }
         }
     }
 
+    // MARK: - Recent notifications
+
+    /// Notifications kept quietly (a quiet app, or a Focus) that arrived since the Recent list was last opened.
+    @Published var quietUnseen = 0
+
+    func openRecent() {
+        homeChoice = .recent
+        quietUnseen = 0
+    }
+
+    func clearRecent() {
+        notifications.removeAll()
+        quietUnseen = 0
+        homeChoice = nil
+    }
+
+    // MARK: - Replying to Messages from the card
+
+    /// The notification being answered (its card stays open and takes the keyboard while you type).
+    @Published var replying: UUID?
+    @Published var replySuggestions: [String] = []
+    @Published var replySending = false
+    @Published var replyError: String?
+    /// Sends a message (text, to handle). Real Messages in the app, a fake in tests.
+    var sendMessage: (String, String) async throws -> Void = { _, _ in }
+    /// Three suggested replies from Apple Intelligence, or none.
+    var suggestReplies: ((CapturedNotification, String) async -> [String])?
+
+    var messagesReplyOn: Bool {
+        get { defaults.object(forKey: "messagesReply") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "messagesReply"); objectWillChange.send() }
+    }
+
+    /// A Messages notification from one person, with replying switched on.
+    func canReply(_ n: CapturedNotification) -> Bool { messagesReplyOn && MessagesReply.handle(for: n.raw) != nil }
+
+    func startReply(_ n: CapturedNotification) {
+        guard canReply(n), let handle = MessagesReply.handle(for: n.raw) else { return }
+        toastTask?.cancel()                 // the card waits while you type
+        replying = n.id
+        replyError = nil
+        replySuggestions = []
+        guard let suggestReplies else { return }
+        Task { [weak self] in
+            let s = await suggestReplies(n, handle)
+            await MainActor.run { if self?.replying == n.id { self?.replySuggestions = s } }
+        }
+    }
+
+    /// Sends what was typed. Only ever on the user's Send.
+    func sendReply(_ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !replySending, let n = toast, n.id == replying, let handle = MessagesReply.handle(for: n.raw) else { return }
+        replySending = true
+        replyError = nil
+        Task { [weak self] in
+            do {
+                try await self?.sendMessage(t, handle)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.replySending = false
+                    self.dismissToast()
+                    self.showFlash(Flash(symbol: "paperplane.fill", text: "Sent", good: true), seconds: 1.6)
+                }
+            } catch {
+                await MainActor.run {
+                    self?.replySending = false
+                    self?.replyError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Leaving the reply without sending (clicked elsewhere): the card goes back to closing by itself.
+    func leaveReply() {
+        guard replying != nil, let n = toast else { replying = nil; return }
+        replying = nil
+        toastTask?.cancel()
+        toastTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            if !Task.isCancelled, self?.toast?.id == n.id { self?.dismissToast() }
+        }
+    }
+
+    /// Closes the card on screen; the next waiting one, if any, takes its place.
     func dismissToast() {
         toastTask?.cancel()
         toast = nil
+        replying = nil
+        replySuggestions = []
+        replyError = nil
+        if !toastQueue.isEmpty {
+            let next = toastQueue.removeFirst()
+            present(next.note, seconds: next.seconds)
+        }
     }
+
+    /// How many notification cards are waiting behind the one on screen.
+    var toastsWaiting: Int { toastQueue.count }
 
     func openSource(of n: CapturedNotification) {
         AppLookup.open(bundleID: n.bundleID)
@@ -786,6 +1154,7 @@ final class NotchModel: ObservableObject {
     /// "Mute app": from now on this app's notifications are kept quietly.
     func muteSource(of n: CapturedNotification) {
         rules.set(.quiet, for: n.bundleID)
+        toastQueue.removeAll { $0.note.bundleID.lowercased() == n.bundleID.lowercased() }
         dismissToast()
         objectWillChange.send()
     }

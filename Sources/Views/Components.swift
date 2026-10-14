@@ -96,18 +96,50 @@ struct KeyBadge: View {
 
 // MARK: - Small pieces
 
+/// A card's first row, split around the physical notch: what it is on the left, its state on the right,
+/// so the space beside the camera is used instead of leaving an empty band above the card.
+/// On a screen without a notch it is an ordinary row.
+struct BesideNotch<Leading: View, Trailing: View>: View {
+    let geometry: NotchGeometry
+    let cardWidth: CGFloat
+    @ViewBuilder var leading: Leading
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        if geometry.hasNotch {
+            let side = geometry.besideNotchWidth(cardWidth: cardWidth)
+            HStack(spacing: 0) {
+                HStack(spacing: 6) { leading }.frame(width: side, alignment: .leading)
+                Color.clear.frame(width: geometry.notchSize.width)
+                HStack(spacing: 6) { trailing }.frame(width: side, alignment: .trailing)
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .frame(height: geometry.notchSize.height)
+        } else {
+            HStack(spacing: 6) { leading; Spacer(minLength: 6); trailing }
+                .lineLimit(1)
+                .frame(height: 24)
+        }
+    }
+}
+
 struct Chip: View {
     let text: String
     var symbol: String?
     var color: Color = .white
+    /// Just the symbol, when there is no room for the words (the words stay as the accessibility label).
+    var compact = false
     var body: some View {
         HStack(spacing: 4) {
             if let symbol { Image(systemName: symbol).font(.system(size: 9, weight: .bold)) }
-            Text(text).font(Theme.label(10.5, .semibold))
+            if !compact || symbol == nil { Text(text).font(Theme.label(10.5, .semibold)).fixedSize() }
         }
         .foregroundStyle(color)
-        .padding(.horizontal, 7).padding(.vertical, 2.5)
+        .padding(.horizontal, compact && symbol != nil ? 6 : 7).padding(.vertical, 2.5)
         .background(Capsule().fill(color.opacity(0.15)))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
     }
 }
 

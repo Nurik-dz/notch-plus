@@ -1,8 +1,109 @@
 import SwiftUI
 
+/// Claude asking you something (its own multiple choice question): the options as buttons, then Send.
+/// "In terminal" gives the question back so Claude Code asks there as usual.
+struct QuestionCard: View {
+    @ObservedObject var model: NotchModel
+    let geometry: NotchGeometry
+    let request: ApprovalRequest
+    let queued: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            BesideNotch(geometry: geometry, cardWidth: NotchGeometry.approvalWidth) {
+                ClaudeBadge(size: 18)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Claude asks").font(Theme.label(11.5, .semibold))
+                    if !request.folderName.isEmpty {
+                        Text(request.folderName).font(Theme.label(9.5)).foregroundStyle(Theme.secondary).truncationMode(.middle)
+                    }
+                }
+            } trailing: {
+                if queued > 1 { Chip(text: "1 of \(queued)", color: Theme.blue) }
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    Text(Elapsed.clock(ctx.date.timeIntervalSince(request.receivedAt)))
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(model.isNudging(at: ctx.date) ? Theme.amber : Theme.tertiary)
+                }
+            }
+            .rise(0)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(request.questions) { q in question(q) }
+                }
+            }
+            .frame(maxHeight: 210)
+            .fixedSize(horizontal: false, vertical: true)
+            .rise(1)
+            HStack(spacing: 7) {
+                Spacer(minLength: 0)
+                Button { model.answerQuestionsInTerminal() } label: {
+                    HStack(spacing: 6) { Text("In terminal"); KeyBadge(text: HotKeys.labels.deny) }
+                }
+                .buttonStyle(PillButtonStyle(kind: .quiet))
+                .help("Answer in the terminal instead")
+                Button { model.answerQuestions() } label: {
+                    HStack(spacing: 6) { Text("Send"); KeyBadge(text: HotKeys.labels.allow) }
+                }
+                .buttonStyle(PillButtonStyle(kind: .allow))
+                .disabled(!model.questionsAnswered)
+                .opacity(model.questionsAnswered ? 1 : 0.45)
+                .accessibilityHint("Sends your choice to Claude")
+            }
+            .rise(2)
+        }
+    }
+
+    private func question(_ q: ClaudeQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                if !q.header.isEmpty { Chip(text: q.header, color: Theme.claude) }
+                if q.multiSelect { Text("pick any").font(Theme.label(10)).foregroundStyle(Theme.tertiary) }
+            }
+            Text(q.question).font(Theme.title(15)).fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 6) {
+                ForEach(q.options) { o in option(o, in: q) }
+            }
+        }
+    }
+
+    private func option(_ o: ClaudeQuestion.Option, in q: ClaudeQuestion) -> some View {
+        let picked = (model.questionPicks[q.question] ?? []).contains(o.label)
+        return Button { withAnimation(Motion.hover) { model.pick(o, in: q) } } label: {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: q.multiSelect ? (picked ? "checkmark.square.fill" : "square")
+                                                : (picked ? "largecircle.fill.circle" : "circle"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(picked ? Theme.claude : Theme.tertiary)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(o.title).font(Theme.label(12.5, .semibold)).foregroundStyle(.white)
+                        if o.isRecommended { Chip(text: "Recommended", color: Theme.green) }
+                    }
+                    if !o.description.isEmpty {
+                        Text(o.description).font(Theme.text(11.5)).foregroundStyle(Theme.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 11).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(picked ? Theme.claude.opacity(0.16) : Color.white.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(picked ? Theme.claude.opacity(0.7) : Color.white.opacity(0.08), lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(picked ? .isSelected : [])
+    }
+}
+
 /// A permission request from Claude Code.
 struct ApprovalCard: View {
     @ObservedObject var model: NotchModel
+    let geometry: NotchGeometry
     let request: ApprovalRequest
     let queued: Int
 
@@ -40,7 +141,16 @@ struct ApprovalCard: View {
         VStack(alignment: .leading, spacing: 9) {
             header.rise(0)
             VStack(alignment: .leading, spacing: 3) {
-                Text(request.headline).font(Theme.title(17))
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(request.headline).font(Theme.title(17)).lineLimit(2)
+                    Spacer(minLength: 4)
+                    if queued > 1 { Chip(text: "1 of \(queued)", color: Theme.blue) }
+                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                        Text(Elapsed.clock(ctx.date.timeIntervalSince(request.receivedAt)))
+                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(model.isNudging(at: ctx.date) ? Theme.amber : Theme.tertiary)
+                    }
+                }
                 explanation
             }
             .rise(1)
@@ -49,33 +159,25 @@ struct ApprovalCard: View {
         }
     }
 
+    /// Beside the notch: who is asking and where on the left, how risky on the right.
     private var header: some View {
-        HStack(spacing: 9) {
-            ClaudeBadge(size: 24)
+        BesideNotch(geometry: geometry, cardWidth: NotchGeometry.approvalWidth) {
+            ClaudeBadge(size: 18)
             VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 6) {
-                    Text("Claude Code").font(Theme.label(12, .semibold))
-                    if queued > 1 { Chip(text: "1 of \(queued)", color: Theme.blue) }
+                Text("Claude Code").font(Theme.label(11.5, .semibold))
+                if let place = placeLine {
+                    Text(place).font(Theme.label(9.5)).foregroundStyle(Theme.secondary).truncationMode(.middle)
                 }
-                HStack(spacing: 4) {
-                    if !request.folderName.isEmpty {
-                        Image(systemName: "folder.fill").font(.system(size: 8.5))
-                        Text(request.folderName).lineLimit(1)
-                    }
-                    if let b = request.branch {
-                        Image(systemName: "arrow.triangle.branch").font(.system(size: 8.5))
-                        Text(b).lineLimit(1)
-                    }
-                }
-                .font(Theme.label(10.5)).foregroundStyle(Theme.secondary)
             }
-            Spacer(minLength: 6)
+        } trailing: {
             Chip(text: riskWord, symbol: riskSymbol, color: riskColor)
-            TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                Text(Elapsed.clock(ctx.date.timeIntervalSince(request.receivedAt)))
-                    .font(.system(size: 10.5, weight: .medium, design: .monospaced)).foregroundStyle(Theme.tertiary)
-            }
         }
+    }
+
+    /// The project folder and the branch, when known.
+    private var placeLine: String? {
+        let parts = [request.folderName.isEmpty ? nil : request.folderName, request.branch].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     @ViewBuilder private var explanation: some View {

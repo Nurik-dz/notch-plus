@@ -48,15 +48,19 @@ final class NotificationRules {
 
     private var modes: [String: String] { defaults.dictionary(forKey: key) as? [String: String] ?? [:] }
 
+    /// App ids are matched ignoring case: macOS stores them in lower case in its notification database.
+    static func isOwn(_ bundleID: String) -> Bool { bundleID.lowercased() == ownBundleID.lowercased() }
+
     func mode(for bundleID: String) -> NotificationMode {
-        if bundleID == Self.ownBundleID { return .ignore }
-        if let saved = modes[bundleID], let m = NotificationMode(rawValue: saved) { return m }
+        if Self.isOwn(bundleID) { return .ignore }
+        let saved = modes[bundleID.lowercased()] ?? modes.first { $0.key.lowercased() == bundleID.lowercased() }?.value
+        if let saved, let m = NotificationMode(rawValue: saved) { return m }
         return .show
     }
 
     func set(_ mode: NotificationMode, for bundleID: String) {
-        var m = modes
-        m[bundleID] = mode.rawValue
+        var m = modes.filter { $0.key.lowercased() != bundleID.lowercased() }
+        m[bundleID.lowercased()] = mode.rawValue
         defaults.set(m, forKey: key)
     }
 

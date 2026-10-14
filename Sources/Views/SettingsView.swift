@@ -28,7 +28,11 @@ final class SettingsModel: ObservableObject {
         notch.hookStatus = installer.status()
         loginState = LoginItem.state
         notifications.start()
-        apps = notch.rules.seenApps.map { (id: $0.key, name: $0.value) }.sorted { $0.name.lowercased() < $1.name.lowercased() }
+        // every app that can send notifications, plus any seen ones the system list does not have
+        var all: [String: String] = [:]
+        for a in notifications.registeredApps() { all[a.id.lowercased()] = a.name }
+        for (id, name) in notch.rules.seenApps where all[id.lowercased()] == nil { all[id.lowercased()] = name }
+        apps = all.map { (id: $0.key, name: $0.value) }.sorted { $0.name.lowercased() < $1.name.lowercased() }
     }
 
     func mode(for id: String) -> NotificationMode { notch.rules.mode(for: id) }
@@ -122,6 +126,10 @@ struct SettingsView: View {
             } header: { Text("Startup") }
 
             SwiftUI.Section {
+                Picker("Island", selection: Binding(get: { notch.islandStyle }, set: { notch.islandStyle = $0 })) {
+                    ForEach(NotchModel.IslandStyle.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
                 Picker("Edge glow", selection: Binding(get: { notch.glowLevel }, set: { notch.glowLevel = $0 })) {
                     ForEach(NotchModel.GlowLevel.allCases) { Text($0.title).tag($0) }
                 }
@@ -131,6 +139,10 @@ struct SettingsView: View {
             SwiftUI.Section {
                 Toggle("Music while it plays", isOn: Binding(
                     get: { notch.showMusicBesideNotch }, set: { notch.showMusicBesideNotch = $0 }))
+                Toggle("Show the song name when the song changes", isOn: Binding(
+                    get: { notch.showSongPeek }, set: { notch.showSongPeek = $0 }))
+                Toggle("Swipe left or right on the notch to skip songs", isOn: Binding(
+                    get: { notch.swipeSkips }, set: { notch.swipeSkips = $0 }))
                 Toggle("Volume and brightness", isOn: Binding(
                     get: { notch.showLevels }, set: { notch.showLevels = $0 }))
             } header: { Text("Show beside the notch") }
@@ -161,6 +173,13 @@ struct SettingsView: View {
                 }
                 note("Claude Code asks Notch+ before it asks you. If Notch+ is not running, Claude Code asks in the terminal as usual, so it never gets stuck.")
                 if let m = settings.message { Text(m).font(.callout) }
+                Toggle("Remind me when Claude has waited", isOn: Binding(
+                    get: { notch.nudgeAfterMinutes > 0 }, set: { notch.nudgeAfterMinutes = $0 ? 3 : 0 }))
+                if notch.nudgeAfterMinutes > 0 {
+                    Stepper("After \(notch.nudgeAfterMinutes) min", value: Binding(
+                        get: { notch.nudgeAfterMinutes }, set: { notch.nudgeAfterMinutes = $0 }), in: 1...30)
+                    note("The timer turns amber and the island glows brighter now and then. Nothing is hidden or delayed.")
+                }
             } header: { Text("Approvals") }
 
             SwiftUI.Section {
@@ -177,15 +196,29 @@ struct SettingsView: View {
                     notificationStatus
                     Spacer()
                     if notch.notificationAccess == .needsFullDiskAccess {
-                        Button("Open Full Disk Access…") { NotificationController.openFullDiskAccessSettings() }
+                        Button("Give Full Disk Access…") {
+                            AccessGuide.shared.showFullDiskAccess { [weak notch] in notch?.notificationAccess == .granted }
+                        }
                             .buttonStyle(.borderedProminent)
                     }
                 }
-                Toggle("Sort with Apple Intelligence", isOn: Binding(
+                Picker("Cards show", selection: Binding(get: { notch.notificationText }, set: { notch.notificationText = $0 })) {
+                    ForEach(NotchModel.NotificationText.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(!Intelligence.isAvailable)
+                Toggle("Label with Apple Intelligence (Needs you, Quiet)", isOn: Binding(
                     get: { notch.sortWithAppleIntelligence }, set: { notch.sortWithAppleIntelligence = $0 }))
+                    .disabled(!Intelligence.isAvailable)
                 note(Intelligence.isAvailable
-                     ? "On this Mac, privately. It marks what needs you now and keeps noise out of the notch."
-                     : "Apple Intelligence is not available on this Mac right now, so every notification is shown by the rules below.")
+                     ? "Your choice. Apple Intelligence runs on this Mac, privately, and never hides a notification: the card opens at once with the full message, and a summary or label is added a moment later only if you switch it on."
+                     : "Apple Intelligence is not available on this Mac right now, so cards show the full message.")
+                Toggle("Show Messages the moment they arrive", isOn: Binding(
+                    get: { notch.instantMessages }, set: { notch.instantMessages = $0 }))
+                note("macOS hands over a message notification 8 to 13 seconds late. With this on, Notch+ reads the message from Messages itself, about a second after it arrives.")
+                Toggle("Reply to Messages from the notch", isOn: Binding(
+                    get: { notch.messagesReplyOn }, set: { notch.messagesReplyOn = $0 }))
+                note("A Reply button on Messages cards from one person (not group chats). Nothing is sent until you press Send. The first time, macOS asks to let Notch+ use Messages.")
                 Toggle("Keep quiet while a Focus is on", isOn: Binding(
                     get: { notch.respectFocus }, set: { notch.respectFocus = $0 }))
             } header: { Text("Notch+ reads your notifications") }

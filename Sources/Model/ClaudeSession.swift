@@ -11,6 +11,12 @@ struct ClaudeSession: Identifiable, Equatable {
     var tool: String?
     var turnStart: Date?
     var lastEvent = Date()
+    /// When this session was first seen.
+    var started = Date()
+    /// The start of Claude's last answer (from the Stop event), for the sessions list.
+    var lastReply: String?
+    /// The terminal it runs in, to jump back to it.
+    var terminal: TerminalRef?
 
     var project: String { cwd.isEmpty ? "Claude" : (cwd as NSString).lastPathComponent }
 
@@ -44,6 +50,8 @@ struct ClaudeFinish: Identifiable, Equatable {
     let branch: String?
     let duration: TimeInterval?
     let message: String?
+    /// The terminal Claude runs in, for "Go to terminal" on the card.
+    var terminal: TerminalRef? = nil
     let date = Date()
 }
 

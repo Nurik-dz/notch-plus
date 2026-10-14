@@ -18,6 +18,12 @@ struct TriageOutput {
     var summary: String
 }
 
+@Generable
+struct ReplyOptions {
+    @Guide(description: "Three different short replies the user could send, each under 12 words, in the same language as the message", .count(3))
+    var replies: [String]
+}
+
 /// Apple Intelligence on this Mac: private, free, no network. Everything here fails soft:
 /// when the model is not available the app simply shows its plain-rule version.
 enum Intelligence {
@@ -58,6 +64,25 @@ enum Intelligence {
             guard let p = NotificationPriority(rawValue: r.content.priority) else { return nil }
             return TriageResult(priority: p, summary: clean(r.content.summary))
         }
+    }
+
+    /// Three short replies to a message, written the way the user writes (their own earlier messages in the
+    /// same chat are the examples). Only suggestions: the user picks, edits and sends them.
+    static func suggestReplies(to message: String, from sender: String, myEarlier: [String]) async -> [String] {
+        guard isAvailable, !message.isEmpty else { return [] }
+        let style = myEarlier.isEmpty ? "" : "\nHow this person usually writes to \(sender) (match the tone, length and casing, not the content):\n"
+            + myEarlier.prefix(8).map { "- \($0)" }.joined(separator: "\n")
+        return await withTimeout(8) {
+            let session = LanguageModelSession(instructions: """
+                You suggest quick replies to a text message for the person who received it. Write as that person, \
+                in the first person, casual and natural. Three different options: for example a yes, a no or later, \
+                and a question back. No greetings unless the message has one, no emoji unless their style uses them, \
+                no quotes around the replies.
+                """)
+            let prompt = "Message from \(sender): \(message.prefix(600))" + style
+            guard let r = try? await session.respond(to: prompt, generating: ReplyOptions.self) else { return nil }
+            return r.content.replies.map(clean).filter { !$0.isEmpty }
+        } ?? []
     }
 
     /// A short summary of any amount of text: long texts are summarised piece by piece, then together.
@@ -113,6 +138,17 @@ enum Intelligence {
         while t.hasPrefix("\"") || t.hasPrefix("'") { t.removeFirst() }
         while t.hasSuffix("\"") || t.hasSuffix("'") { t.removeLast() }
         return t.count > 120 ? String(t.prefix(117)) + "..." : t
+    }
+
+    /// For answers to questions about a file: tidied but never shortened, paragraphs kept.
+    /// (`clean` is for one-line summaries and cuts at 120 characters.)
+    static func cleanAnswer(_ s: String) -> String {
+        var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "`", with: "")
+        while t.hasPrefix("\"") { t.removeFirst() }
+        while t.hasSuffix("\"") { t.removeLast() }
+        return t
     }
 
     private static func withTimeout<T: Sendable>(_ seconds: Double, _ op: @escaping @Sendable () async -> T?) async -> T? {

@@ -34,16 +34,20 @@ enum Motion {
         return fps >= 100 ? 1.0 : 1.12
     }
 
-    /// How the island's shape changes size: bouncy when something arrives, calm when it leaves.
+    /// How the island's shape changes size: a calm grow with a hint of bounce when something arrives,
+    /// no overshoot when it leaves.
     static func spring(for state: IslandState) -> Animation {
         if reduce { return .easeOut(duration: 0.2) }
         switch state {
-        case .approval, .notification, .finished, .result: return .spring(response: 0.40 * scale, dampingFraction: 0.74)
+        case .approval, .notification, .finished, .result: return .spring(response: 0.40 * scale, dampingFraction: 0.85)
         case .overview: return .spring(response: 0.46 * scale, dampingFraction: 0.82)
         case .wings: return .spring(response: 0.40 * scale, dampingFraction: 0.78)
         case .closed: return .spring(response: 0.46 * scale, dampingFraction: 1.0)   // no overshoot below the notch
         }
     }
+
+    /// The music drop splitting off the island and melting back: a little looser, so the neck reads as liquid.
+    static var drop: Animation { reduce ? .easeOut(duration: 0.2) : .spring(response: 0.5 * scale, dampingFraction: 0.72) }
 
     /// When a card's own height changes (a line of text arrives): a soft, slightly slower settle.
     static var resize: Animation { reduce ? .easeOut(duration: 0.15) : .spring(response: 0.38 * scale, dampingFraction: 0.86) }
@@ -58,30 +62,44 @@ enum Motion {
 }
 
 /// A tiny copy of the cover, scaled up smoothly into a soft blurred glow (cheap: no blur filter to run every frame).
-enum AmbientArt {
+/// Small ready-made pictures of a cover, made once and kept: drawing them costs almost nothing, unlike blurring or
+/// scaling the full cover again on every animation frame.
+enum ArtImages {
     private static var cache: [String: NSImage] = [:]
+    private static let context = CIContext()
 
-    static func image(for art: NSImage, key: String) -> NSImage {
-        if let c = cache[key] { return c }
-        let side: CGFloat = 64
-        let small = NSImage(size: NSSize(width: side, height: side))
-        small.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .high
-        art.draw(in: NSRect(x: 0, y: 0, width: side, height: side), from: .zero, operation: .copy, fraction: 1)
-        small.unlockFocus()
-        var result = small
-        // blur the small copy once, so the glow is smooth when it is stretched to fill the island
-        if let tiff = small.tiffRepresentation, let ci = CIImage(data: tiff),
-           let f = CIFilter(name: "CIGaussianBlur", parameters: [kCIInputImageKey: ci.clampedToExtent(), kCIInputRadiusKey: 7]),
-           let out = f.outputImage?.cropped(to: ci.extent) {
-            let rep = NSCIImageRep(ciImage: out)
-            let img = NSImage(size: NSSize(width: side, height: side))
-            img.addRepresentation(rep)
-            result = img
+    /// The cover scaled to `side` points (kept at 2x), optionally blurred, as a plain bitmap.
+    static func scaled(_ art: NSImage, side: CGFloat, blur: Double = 0, key: String) -> NSImage {
+        let id = "\(key)|\(Int(side))|\(blur)"
+        if let c = cache[id] { return c }
+        let px = Int(side * 2)
+        var result = art
+        if let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
+                               space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+           let cg = art.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            ctx.interpolationQuality = .high
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: px, height: px))
+            if var out = ctx.makeImage() {
+                if blur > 0 {
+                    let ci = CIImage(cgImage: out)
+                    if let f = CIFilter(name: "CIGaussianBlur", parameters: [kCIInputImageKey: ci.clampedToExtent(), kCIInputRadiusKey: blur * 2]),
+                       let blurred = f.outputImage?.cropped(to: ci.extent), let baked = context.createCGImage(blurred, from: ci.extent) {
+                        out = baked
+                    }
+                }
+                result = NSImage(cgImage: out, size: NSSize(width: side, height: side))
+            }
         }
-        if cache.count > 20 { cache.removeAll() }
-        cache[key] = result
+        if cache.count > 60 { cache.removeAll() }
+        cache[id] = result
         return result
+    }
+}
+
+/// The heavily blurred copy that glows behind the open island (made once, as a bitmap).
+enum AmbientArt {
+    static func image(for art: NSImage, key: String) -> NSImage {
+        ArtImages.scaled(art, side: 64, blur: 7, key: key)
     }
 }
 
@@ -151,6 +169,32 @@ enum ImageColor {
         let color = compute(image) ?? Theme.blue
         cache[key] = color
         return color
+    }
+
+    private static var lightCache: [String: Bool] = [:]
+
+    /// Whether the bottom edge of the picture is light (so a line drawn over it should be dark).
+    static func bottomIsLight(of image: NSImage, key: String) -> Bool {
+        if let c = lightCache[key] { return c }
+        let side = 24
+        var light = false
+        if let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+                               space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+           let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil), let data = ctx.data {
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+            let px = data.bindMemory(to: UInt8.self, capacity: side * side * 4)
+            var sum = 0.0, n = 0.0
+            for row in (side - 4)..<side {                  // the last rows of the buffer are the bottom of the picture
+                for col in 0..<side {
+                    let i = (row * side + col) * 4
+                    sum += (0.2126 * Double(px[i]) + 0.7152 * Double(px[i + 1]) + 0.0722 * Double(px[i + 2])) / 255
+                    n += 1
+                }
+            }
+            light = n > 0 && sum / n > 0.6
+        }
+        lightCache[key] = light
+        return light
     }
 
     private static func compute(_ image: NSImage) -> Color? {

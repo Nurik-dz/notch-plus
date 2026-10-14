@@ -44,9 +44,12 @@ struct HookInstaller {
         TOKEN_FILE="\(paths.token.path)"
         [ -r "$TOKEN_FILE" ] || exit 0
         if [ "$1" = "permission" ]; then MAX=590; ENDPOINT=permission; else MAX=2; ENDPOINT=event; fi
+        # which terminal this Claude runs in (app, tab id, tty of the claude process) and its project folder
+        TTY="$(/bin/ps -o tty= -p $PPID 2>/dev/null | /usr/bin/tr -d ' ')"
         /usr/bin/curl -s --max-time $MAX --connect-timeout 1 -X POST \\
           -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \\
           -H "Content-Type: application/json" \\
+          -H "X-Notch-Terminal: ${TERM_PROGRAM:-}|${TERM_SESSION_ID:-}|${ITERM_SESSION_ID:-}|${TTY}|${CLAUDE_PROJECT_DIR:-}" \\
           --data-binary @- "http://127.0.0.1:\(NotchConfig.port)/$ENDPOINT"
         exit 0
 
@@ -97,6 +100,16 @@ struct HookInstaller {
             settings = setGroups(settings, e.name, g)
         }
         return try write(settings)
+    }
+
+    /// Brings an installed hook script up to date (the script file can change without touching
+    /// Claude Code's settings, since they only point at its path). Does nothing when not connected.
+    func refreshScriptIfConnected() {
+        guard status() != .notConnected,
+              FileManager.default.fileExists(atPath: paths.hookScript.path),
+              (try? String(contentsOf: paths.hookScript, encoding: .utf8)) != scriptText else { return }
+        try? scriptText.write(to: paths.hookScript, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: paths.hookScript.path)
     }
 
     @discardableResult

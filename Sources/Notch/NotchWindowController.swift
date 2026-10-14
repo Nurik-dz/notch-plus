@@ -79,7 +79,8 @@ final class NotchWindowController {
         panel.ignoresMouseEvents = !model.isOpen
         // typing needs the keyboard: only while a question box is open on an open island
         if model.asking != nil, !(model.state == .overview) { model.asking = nil }
-        let wantsKeys = model.asking != nil
+        if model.replying != nil, model.state != .notification { model.replying = nil }
+        let wantsKeys = model.asking != nil || model.replying != nil
         if panel.acceptsKeyboard != wantsKeys {
             panel.acceptsKeyboard = wantsKeys
             if wantsKeys { panel.makeKey() } else if panel.isKeyWindow { panel.resignKey() }
@@ -100,18 +101,22 @@ final class NotchWindowController {
         }
         // Two fingers down over the notch open it, two fingers up close it.
         let scrolled: (NSEvent) -> Void = { [weak self] e in
-            guard e.hasPreciseScrollingDeltas else { return }      // trackpad only, not a mouse wheel
+            guard e.hasPreciseScrollingDeltas, e.momentumPhase.isEmpty else { return }      // trackpad only; the coasting after the fingers lift is ignored
             let dy = e.isDirectionInvertedFromDevice ? Double(e.scrollingDeltaY) : -Double(e.scrollingDeltaY)
+            let dx = e.isDirectionInvertedFromDevice ? Double(e.scrollingDeltaX) : -Double(e.scrollingDeltaX)
             let began = e.phase.contains(.began) || e.phase.contains(.mayBegin)
             let ended = e.phase.contains(.ended) || e.phase.contains(.cancelled)
-            Task { @MainActor in self?.swiped(dy: dy, began: began, ended: ended) }
+            Task { @MainActor in self?.swiped(dx: dx, dy: dy, began: began, ended: ended) }
         }
         if let s = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel], handler: scrolled) { monitors.append(s) }
         // an open island takes the events itself, so watch those too (and let them carry on to the shelf's list)
         if let l = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel], handler: { e in scrolled(e); return e }) { monitors.append(l) }
         // A click in another app means you are done asking: give the keyboard back.
         if let click = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] _ in
-            Task { @MainActor in if self?.model.asking != nil { self?.model.asking = nil } }
+            Task { @MainActor in
+                if self?.model.asking != nil { self?.model.asking = nil }
+                if self?.model.replying != nil { self?.model.leaveReply() }
+            }
         }) { monitors.append(click) }
         // When the button is let go the drop has happened; give it a moment, then close the shelf.
         if let up = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { [weak self] _ in
@@ -129,13 +134,16 @@ final class NotchWindowController {
 
     private var swipe = SwipeTracker()
 
-    private func swiped(dy: Double, began: Bool, ended: Bool) {
+    private func swiped(dx: Double, dy: Double, began: Bool, ended: Bool) {
         let p = NSEvent.mouseLocation
         let onIsland = geometry.hotRect.insetBy(dx: -40, dy: -20).contains(p)
             || (model.hovering && geometry.shapeRect(.overview, height: model.contentHeights[.overview]).contains(p))
         guard onIsland else { _ = swipe.feed(dy: 0, began: began, ended: true); return }
-        guard let s = swipe.feed(dy: dy, began: began, ended: ended) else { return }
+        guard let s = swipe.feed(dx: dx, dy: dy, began: began, ended: ended) else { return }
         switch s {
+        case .left where model.swipeSkips, .right where model.swipeSkips:
+            model.skipBySwipe(next: s == .right)
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         case .down where !model.hovering:
             openWork?.cancel(); openWork = nil
             model.anticipating = false

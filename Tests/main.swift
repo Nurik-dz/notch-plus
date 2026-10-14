@@ -55,6 +55,7 @@ try FileManager.default.createDirectory(at: snapDir, withIntermediateDirectories
 let home = base.appendingPathComponent("home")
 try FileManager.default.createDirectory(at: home.appendingPathComponent(".claude"), withIntermediateDirectories: true)
 let paths = AppPaths(home: home)
+AppPaths.defaultHome = home      // every model the tests make uses the scratch home, never the real shelf
 
 MainActor.assumeIsolated {
 
@@ -296,6 +297,18 @@ MainActor.assumeIsolated {
         m.pending.removeAll()
         m.explanations = [:]
 
+        // Claude asking a question
+        m.handle(json: ["tool_name": "AskUserQuestion", "session_id": "s1", "cwd": "/Users/nurik/Desktop/Notch+",
+                        "tool_input": ["questions": [["question": "Which layout should the settings window use?", "header": "Layout", "multiSelect": false,
+                                                      "options": [["label": "Tabs (Recommended)", "description": "Four tabs, like today."],
+                                                                  ["label": "Sidebar", "description": "A list on the left, like System Settings."]]]]]],
+                 connection: dummy)
+        let q0 = m.current!.request.questions[0]
+        m.pick(q0.options[0], in: q0)
+        snapshot(c, "\(tag)-question", wait: 0.6)
+        m.pending.removeAll()
+        m.questionPicks = [:]
+
         // after an answer: a short moment beside the notch
         m.showFlash(NotchModel.Flash(symbol: "checkmark", text: "Allowed", good: true), seconds: 3)
         check(m.state == .wings, "\(tag): answer shows beside the notch")
@@ -310,14 +323,29 @@ MainActor.assumeIsolated {
         pump(0.15)
         check(m.state == .notification && !c.panel.ignoresMouseEvents, "\(tag): a notification opens the island and takes clicks")
         snapshot(c, "\(tag)-notification")
+        m.dismissToast()
         m.showToast(note("Xcode", "com.apple.dt.xcode", "Build Succeeded", nil, "Notch+ built in 31 seconds", .later), seconds: 5)
         snapshot(c, "\(tag)-notification-plain", wait: 0.6)
         m.dismissToast()
+        // a Messages card with Reply, then typing a reply
+        let sam = CapturedNotification(raw: RawNotification(recordID: 4242, bundleID: "com.apple.mobilesms", title: "Sam", subtitle: nil,
+                                                            body: "Drinks tonight around 9? Same place as last time", date: Date(), thread: "any;-;sam@example.com"),
+                                       appName: "Messages")
+        m.suggestReplies = { _, _ in ["Yes, see you at 9", "Can't tonight", "Which place?"] }
+        m.showToast(sam, seconds: 30)
+        snapshot(c, "\(tag)-notification-reply-button", wait: 0.6)
+        m.startReply(sam)
+        pump(0.3)
+        check(c.panel.acceptsKeyboard, "\(tag): replying gives the island the keyboard")
+        snapshot(c, "\(tag)-notification-replying", wait: 0.8)
+        m.dismissToast()
+        pump(0.2)
+        check(!c.panel.acceptsKeyboard, "\(tag): closing the reply gives the keyboard back")
         pump(0.6)
         check(m.state == .closed, "\(tag): dismissing closes it")
 
         // Claude finished a long task
-        m.showFinished(ClaudeFinish(project: "Notch+", branch: "main", duration: 134, message: "I added the new notification cards and all 120 checks pass."), seconds: 5)
+        m.showFinished(ClaudeFinish(project: "Notch+", branch: "main", duration: 134, message: "I added the new notification cards and all 120 checks pass.", terminal: TerminalRef(program: "Apple_Terminal", tty: "ttys000")), seconds: 5)
         check(m.state == .finished, "\(tag): Claude finishing shows a card")
         snapshot(c, "\(tag)-finished")
         m.dismissFinished()
@@ -327,6 +355,11 @@ MainActor.assumeIsolated {
 
     // MARK: 6. Notifications from other apps (made-up database, never your real one)
     print("6. Notifications")
+    // the Full Disk Access card finds System Settings through the window list (top-left origin) and must
+    // convert to AppKit's bottom-left origin to sit under its window
+    let mainH = NSScreen.screens.first?.frame.height ?? 0
+    check(AccessGuide.appKitFrame(CGRect(x: 100, y: 50, width: 600, height: 400)) == CGRect(x: 100, y: mainH - 450, width: 600, height: 400),
+          "access card: window list coordinates are flipped to the screen's")
     let suite = UserDefaults(suiteName: "notchplus.tests")!
     suite.removePersistentDomain(forName: "notchplus.tests")
     let rules = NotificationRules(defaults: suite)
@@ -374,14 +407,26 @@ MainActor.assumeIsolated {
     check(waitUntil(4) { nm.notifications.contains { $0.bundleID == "com.example.chatty" } }, "quiet app: kept in the recent list")
     check(nm.toast == nil, "quiet app: the island does not open")
 
+    nm.dismissToast()
     insertRow(6, app: 4, blob: plist(["titl": "Old format", "body": "text at the top level"]))
     check(waitUntil(4) { nm.toast?.headline == "Old format" }, "older macOS layout (no req) is read too")
 
+    nm.dismissToast()
     insertRow(7, app: 4, blob: Data("this is not a plist".utf8))
     insertRow(8, app: 5, blob: plist(["req": ["titl": "Notch+ itself", "body": "should never loop"]]))
     insertRow(9, app: 1, blob: plist(["req": ["titl": "After the bad one", "body": "still works"]]))
     check(waitUntil(4) { nm.toast?.headline == "After the bad one" }, "a broken row is skipped and reading continues")
     check(!nm.notifications.contains { $0.bundleID == "com.nurik.NotchPlus" }, "Notch+'s own notifications are never shown")
+
+    // Messages re-delivers by updating its existing record (same rec_id, newer delivered_date), seen on macOS 27
+    while nm.toast != nil { nm.dismissToast() }
+    let redelivered = plist(["req": ["titl": "Mum", "body": "Are you coming?", "thre": "any;-;mum@example.com"]])
+    var up: OpaquePointer?
+    sqlite3_prepare_v2(fdb, "UPDATE record SET data = ?, delivered_date = ? WHERE rec_id = 3", -1, &up, nil)
+    redelivered.withUnsafeBytes { _ = sqlite3_bind_blob(up, 1, $0.baseAddress, Int32(redelivered.count), transient) }
+    sqlite3_bind_double(up, 2, Date().timeIntervalSinceReferenceDate + 1)
+    sqlite3_step(up); sqlite3_finalize(up)
+    check(waitUntil(4) { nm.toast?.detail == "Are you coming?" }, "a notification re-delivered into its old record still shows")
     check(NotificationRules(defaults: suite).mode(for: "com.example.noisy") == .ignore, "per-app choices are saved")
     check(nm.notifications.count <= 30, "recent list is capped")
 
@@ -396,6 +441,17 @@ MainActor.assumeIsolated {
     let nc3 = NotificationController(model: nm2, databasePath: nil)
     nc3.start()
     check(nm2.notificationAccess == .needsFullDiskAccess, "no database at all: asks for Full Disk Access")
+    nc2.stop(); nc3.stop()
+    // access that arrives after Notch+ opened (granted later, or after a rebuild) starts the watcher by itself
+    var accessGranted = false
+    let nm3 = NotchModel(rules: rules)
+    let nc4 = NotificationController(model: nm3, databasePath: accessGranted ? dbPath : nil)
+    nc4.start()
+    check(nm3.notificationAccess == .needsFullDiskAccess, "late access: waits while there is none")
+    accessGranted = true
+    pump(4)
+    check(nm3.notificationAccess == .granted, "late access: starts by itself once it can read, no reopening needed")
+    nc4.stop()
     sqlite3_close(fdb)
 
 
@@ -440,6 +496,32 @@ MainActor.assumeIsolated {
     let sub = base.appendingPathComponent("repo/Sources/App"); try! FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
     check(GitBranch.read(from: sub.path) == "feature/notch", "git branch found from a folder inside the repo")
     check(GitBranch.read(from: "/nonexistent/place") == nil, "no repo: no branch")
+
+    // sessions list and jumping back to the terminal (environment recorded from a real hook on 2026-10-13)
+    let sl = NotchModel(rules: NotificationRules(defaults: suite), defaults: UserDefaults(suiteName: "notchplus.tests.sessions")!)
+    let term: [String: String] = ["program": "Apple_Terminal", "tab": "A0281CF4-7D5B-4D85-B9C3-0E25F95AB56F", "iterm": "", "tty": "ttys000"]
+    sl.handleEvent(["hook_event_name": "UserPromptSubmit", "session_id": "x", "cwd": "/tmp/proj/Sources/App",
+                    "_notch_project_dir": "/tmp/proj", TerminalRef.key: term])
+    check(sl.sessions["x"]?.project == "proj", "sessions: the project is Claude's own folder, not the subfolder it is in")
+    check(sl.sessions["x"]?.terminal == TerminalRef(program: "Apple_Terminal", tab: "A0281CF4-7D5B-4D85-B9C3-0E25F95AB56F", tty: "ttys000"),
+          "sessions: the terminal it runs in is remembered")
+    sl.handleEvent(["hook_event_name": "Stop", "session_id": "x", "_notch_project_dir": "/tmp/proj",
+                    "last_assistant_message": "All **tests** pass.\nI also updated `README.md`."])
+    check(sl.sessions["x"]?.lastReply == "All tests pass. I also updated README.md.", "sessions: Claude's last answer is kept on one clean line")
+    sl.handleEvent(["hook_event_name": "UserPromptSubmit", "session_id": "y", "cwd": "/tmp/two"])
+    sl.handleEvent(["hook_event_name": "Notification", "session_id": "z", "cwd": "/tmp/three", "notification_type": "permission_prompt"])
+    sl.sessions["x"]?.turnStart = Date().addingTimeInterval(-60)
+    sl.sessions["x"]?.status = .working
+    sl.handleEvent(["hook_event_name": "Stop", "session_id": "x", "_notch_project_dir": "/tmp/proj", "last_assistant_message": "Done."])
+    check(sl.finished?.terminal?.tty == "ttys000", "finished card: knows Claude's terminal, for Go to terminal")
+    let tScript = TerminalJump.script(for: TerminalRef(program: "Apple_Terminal", tty: "ttys004")) ?? ""
+    check(tScript.contains("tty of t is \"/dev/ttys004\"") && tScript.contains("set selected of t to true"), "jump: Terminal picks the tab by its tty")
+    let iScript = TerminalJump.script(for: TerminalRef(program: "iTerm.app", iterm: "w0t1p0:ABC-123")) ?? ""
+    check(iScript.contains("unique id of s is \"ABC-123\""), "jump: iTerm2 picks the session by its id")
+    check(TerminalJump.script(for: TerminalRef(program: "vscode")) == nil && TerminalRef(program: "vscode").bundleID == "com.microsoft.VSCode",
+          "jump: other apps are brought forward")
+    check(HookInstaller(paths: paths).scriptText.contains("X-Notch-Terminal: ${TERM_PROGRAM:-}|${TERM_SESSION_ID:-}|${ITERM_SESSION_ID:-}|${TTY}|${CLAUDE_PROJECT_DIR:-}"),
+          "hook script: sends the terminal and the project folder")
 
     // events through the real server
     print("   server events")
@@ -500,11 +582,124 @@ MainActor.assumeIsolated {
     }
     tm.triage = { r in r.title == "Spam" ? TriageResult(priority: .noise, summary: "A promotion.") : TriageResult(priority: .now, summary: "Needs an answer by five.") }
     tm.receive([raw(1, "com.example.a", "Spam", "50% off today")])
-    check(waitUntil { tm.notifications.count == 1 }, "sorted-out noise is still kept in the list")
-    check(tm.toast == nil && tm.notifications.first?.priority == .noise, "noise: the island does not open")
+    check(tm.toast != nil && tm.notifications.count == 1, "every notification shows at once, before Apple Intelligence answers")
+    check(waitUntil { tm.notifications.first?.priority == .noise } && tm.toast != nil, "noise is only labelled, never hidden")
+    tm.dismissToast()
     tm.receive([raw(2, "com.example.a", "Mum", "Dinner?")])
-    check(waitUntil { tm.toast != nil }, "important one: the island opens")
-    check(tm.toast?.priority == .now && tm.toast?.summary == "Needs an answer by five.", "priority and summary are attached")
+    check(tm.toast != nil, "important one: the island opens")
+    check(waitUntil { tm.toast?.priority == .now } && tm.toast?.summary == nil, "by default the label is added but the full message stays (no summary)")
+    tm.dismissToast()
+    tm.notificationText = .summary
+    tm.receive([raw(4, "com.example.a", "Mum", "Dinner tonight at seven at our place, can you bring the salad and pick up bread on the way? Let me know before five please.")])
+    check(waitUntil { tm.toast?.summary == "Needs an answer by five." }, "with Short summary chosen, the summary is added to the open card")
+    tm.sortWithAppleIntelligence = false
+    tm.dismissToast()
+    tm.receive([raw(5, "com.example.a", "Mum", "Dinner tonight at seven at our place, can you bring the salad and pick up bread on the way? Let me know before five please.")])
+    check(waitUntil { tm.toast?.summary != nil } && tm.toast?.priority == nil, "summary without labels when only the summary is chosen")
+    tm.dismissToast()
+    tm.receive([raw(8, "com.example.a", "Mum", "You good?")])
+    pump(0.4)
+    check(tm.toast?.summary == nil, "summary: a short message stays word for word (no summary asked for)")
+    tm.sortWithAppleIntelligence = true
+    tm.notificationText = .full
+    // two at the same moment: both are shown, one after the other
+    tm.dismissToast()
+    tm.receive([raw(6, "com.apple.mobilesms", "Sam", "Hi"), raw(7, "ru.keepcoder.telegram", "Alex", "Yo")])
+    check(tm.toast?.headline == "Sam" && tm.toastsWaiting == 1, "two at once: the first shows, the second waits (+1)")
+    tm.dismissToast()
+    check(tm.toast?.headline == "Alex" && tm.toastsWaiting == 0, "two at once: the second shows when the first closes")
+    tm.dismissToast()
+
+    // the Recent list: quiet notifications are counted until it is opened
+    tm.dismissToast()
+    tm.quietUnseen = 0
+    trules.set(.quiet, for: "com.example.quiet")
+    tm.receive([raw(30, "com.example.quiet", "Newsletter", "This week in Swift"), raw(31, "com.example.quiet", "Newsletter", "Part two")])
+    check(tm.toast == nil && tm.quietUnseen == 2, "recent: quiet notifications open no card but are counted")
+    check(tm.notifications.first?.headline == "Newsletter", "recent: they are in the list")
+    tm.openRecent()
+    check(tm.homeTab == .recent && tm.quietUnseen == 0, "recent: opening the list shows it and clears the count")
+    tm.clearRecent()
+    check(tm.notifications.isEmpty && tm.homeTab != .recent, "recent: Clear empties it and the tab gives way")
+
+    // replying to Messages from the card
+    func msg(_ id: Int, thread: String?, app: String = "com.apple.mobilesms") -> RawNotification {
+        RawNotification(recordID: Int64(id), bundleID: app, title: "Sam", subtitle: nil, body: "Drinks at 9?", date: Date(), thread: thread)
+    }
+    check(MessagesReply.handle(for: msg(20, thread: "any;-;sam@example.com")) == "sam@example.com", "reply: the handle is read from the thread id (any;-;<handle>)")
+    check(MessagesReply.handle(for: msg(21, thread: "any;-;+15551234567")) == "+15551234567", "reply: phone numbers work too")
+    check(MessagesReply.handle(for: msg(22, thread: "any;+;chat12345")) == nil, "reply: group chats are not offered")
+    check(MessagesReply.handle(for: msg(23, thread: nil)) == nil && MessagesReply.handle(for: msg(24, thread: "any;-;x", app: "ru.keepcoder.telegram")) == nil,
+          "reply: only Messages, and only with a thread id")
+    let replyScript = MessagesReply.script(text: "say \"hi\" \\ ok", to: "sam@example.com")
+    check(replyScript.contains("send \"say \\\"hi\\\" \\\\ ok\" to participant \"sam@example.com\""), "reply: quotes and backslashes in the text are escaped")
+    var replySent: [(String, String)] = []
+    tm.sendMessage = { t, h in replySent.append((t, h)) }
+    tm.suggestReplies = { _, _ in ["Yes!", "Can't tonight", "Where?"] }
+    tm.receive([msg(25, thread: "any;-;sam@example.com")])
+    check(tm.toast != nil && tm.canReply(tm.toast!), "reply: a Messages card offers Reply")
+    tm.startReply(tm.toast!)
+    check(waitUntil { tm.replySuggestions.count == 3 } && tm.replying == tm.toast?.id, "reply: three suggestions arrive, nothing is sent")
+    check(replySent.isEmpty, "reply: suggestions are never sent by themselves")
+    pump(6.5)
+    check(tm.toast != nil, "reply: the card stays open while you type (no 6 second close)")
+    tm.sendReply("   ")
+    check(replySent.isEmpty, "reply: an empty reply is not sent")
+    tm.sendReply("Yes! See you there")
+    check(waitUntil { tm.toast == nil } && replySent.count == 1 && replySent[0].0 == "Yes! See you there" && replySent[0].1 == "sam@example.com",
+          "reply: Send sends once, to the right person, and the card closes")
+    check(tm.flash?.text == "Sent", "reply: a short Sent shows beside the notch")
+    tm.sendMessage = { _, _ in throw MessagesReply.SendError.notAllowed }
+    tm.receive([msg(26, thread: "any;-;sam@example.com")])
+    tm.startReply(tm.toast!)
+    tm.sendReply("ok")
+    check(waitUntil { tm.replyError != nil } && tm.toast != nil && tm.replyError!.contains("Automation"),
+          "reply: if Messages refuses, the card stays and says how to allow it")
+    tm.messagesReplyOn = false
+    check(!tm.canReply(tm.toast!), "reply: switched off in Settings, no Reply button")
+    tm.messagesReplyOn = true
+    tm.dismissToast()
+    check(tm.replying == nil, "reply: closing the card ends the reply")
+
+    // Claude's own questions, with the payload recorded from a real Claude Code session (2026-10-13)
+    let askJSON = #"{"session_id":"q1","cwd":"/Users/nurik/Desktop/Notch+","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which database should we use?","header":"Database","options":[{"label":"SQLite (Recommended)","description":"Simple, one file."},{"label":"Postgres","description":"A server."}],"multiSelect":false},{"question":"Which extras?","header":"Extras","options":[{"label":"Tests","description":""},{"label":"Docs","description":""},{"label":"CI","description":""}],"multiSelect":true}]}}"#
+    let askObj = try! JSONSerialization.jsonObject(with: Data(askJSON.utf8)) as! [String: Any]
+    let qConn = HookConnection(NWConnection(host: "127.0.0.1", port: 9, using: .tcp))
+    tm.handle(json: askObj, connection: qConn)
+    let qr = tm.current?.request
+    check(qr?.isQuestion == true && qr?.questions.count == 2 && qr?.questions[0].options.count == 2 && qr?.questions[1].multiSelect == true,
+          "question: Claude's question arrives as a question, not as a tool approval")
+    check(qr?.questions[0].options[0].isRecommended == true && qr?.questions[0].options[0].title == "SQLite", "question: the recommended option is marked and shown without the marker")
+    check(tm.state == .approval, "question: the island opens for it")
+    tm.answer(allow: true)
+    check(tm.current?.request.isQuestion == true && qConn.sentBody == nil, "question: Send does nothing until every question has a pick")
+    tm.pick(qr!.questions[0].options[1], in: qr!.questions[0])
+    tm.pick(qr!.questions[0].options[0], in: qr!.questions[0])
+    check(tm.questionPicks["Which database should we use?"] == ["SQLite (Recommended)"], "question: one choice replaces the other")
+    tm.pick(qr!.questions[1].options[2], in: qr!.questions[1])
+    tm.pick(qr!.questions[1].options[0], in: qr!.questions[1])
+    tm.pick(qr!.questions[1].options[2], in: qr!.questions[1])
+    tm.pick(qr!.questions[1].options[2], in: qr!.questions[1])
+    check(Set(tm.questionPicks["Which extras?"] ?? []) == ["Tests", "CI"], "question: several picks toggle on and off")
+    check(tm.questionsAnswered, "question: ready to send")
+    tm.answerQuestions()
+    let qBody = (try? JSONSerialization.jsonObject(with: Data((qConn.sentBody ?? "").utf8))) as? [String: Any]
+    let qDecision = (qBody?["hookSpecificOutput"] as? [String: Any])?["decision"] as? [String: Any]
+    let qUpdated = qDecision?["updatedInput"] as? [String: Any]
+    let qAnswers = qUpdated?["answers"] as? [String: String]
+    check(qDecision?["behavior"] as? String == "allow" && (qUpdated?["questions"] as? [[String: Any]])?.count == 2,
+          "question: the answer allows the tool and echoes the questions")
+    check(qAnswers?["Which database should we use?"] == "SQLite (Recommended)" && qAnswers?["Which extras?"] == "Tests, CI",
+          "question: answers are keyed by question text with the exact labels, several joined in Claude's order")
+    check(qUpdated?["annotations"] is [String: Any], "question: annotations are included, as Claude Code itself sends them")
+    check(tm.pending.isEmpty && tm.questionPicks.isEmpty, "question: answered and cleared")
+    let qConn2 = HookConnection(NWConnection(host: "127.0.0.1", port: 9, using: .tcp))
+    tm.handle(json: askObj, connection: qConn2)
+    tm.answer(allow: false)
+    check(qConn2.sentBody == "{}" && tm.pending.isEmpty, "question: In terminal hands it back (an empty answer, so Claude Code asks there)")
+    check(trules.mode(for: "COM.EXAMPLE.A") == .show && NotificationRules.isOwn("com.nurik.notchplus"), "app ids match ignoring case (the database stores them in lower case)")
+    trules.set(.quiet, for: "com.Example.B")
+    check(trules.mode(for: "com.example.b") == .quiet, "a choice made for one spelling holds for the other")
     tm.dismissToast()
     tm.sortWithAppleIntelligence = false
     tm.receive([raw(3, "com.example.a", "Spam", "again")])
@@ -719,12 +914,14 @@ MainActor.assumeIsolated {
     check(hm.wingsWidth < NotchGeometry.wingWidth, "wings: music is slimmer than Claude's")
     hm.handleEvent(["hook_event_name": "UserPromptSubmit", "session_id": "q", "cwd": "/tmp"])
     check(hm.wingsWidth == NotchGeometry.wingWidth, "wings: Claude working takes over the space")
+    check(hm.musicBubble, "wings: music still playing moves into the drop beside the island")
     hm.sessions = [:]
+    check(!hm.musicBubble, "wings: with Claude done, the music comes back beside the notch")
     hm.showMusicBesideNotch = false
     check(hm.state == .closed, "wings: switched off in settings, the notch stays quiet")
     hm.showMusicBesideNotch = true
     hm.showHUD(HUDReading(kind: .volume, level: 0.5), seconds: 0.2)
-    check(hm.state == .wings && hm.hud?.percent == 50 && hm.wingsWidth == NotchGeometry.wingWidth, "hud: volume shows beside the notch at full wing width")
+    check(hm.state == .wings && hm.hud?.percent == 50 && hm.wingsWidth < NotchGeometry.wingWidth && hm.wingsWidth > 60, "hud: volume shows beside the notch, wings sized to the level bar")
     pump(0.5)
     check(hm.hud == nil, "hud: it goes away by itself")
     hm.showLevels = false
@@ -865,6 +1062,18 @@ MainActor.assumeIsolated {
             asker.clear()
         }
         sm.homeChoice = nil
+        // the Recent list
+        sm.notifications = [
+            note("Messages", "com.apple.mobilesms", "Sam", nil, "Drinks at 9?", .now, ago: 120),
+            note("Mail", "com.apple.mail", "Weekly report", nil, "Your numbers for the week are in.", nil, ago: 1800),
+            note("Xcode", "com.apple.dt.xcode", "Build Succeeded", nil, "Notch+ built in 31 seconds", nil, ago: 5400),
+        ]
+        sm.quietUnseen = 2
+        snapshot(c, "\(tag)-home-recent-tab", wait: 0.5)
+        sm.openRecent()
+        snapshot(c, "\(tag)-home-recent", wait: 0.7)
+        sm.notifications = []
+        sm.homeChoice = nil
         sm.setNowPlaying(nil)
         sm.homeChoice = .player
         snapshot(c, "\(tag)-home-player-empty", wait: 0.6)
@@ -886,6 +1095,12 @@ MainActor.assumeIsolated {
         pump(0.8)
         check(sm.state == .wings, "\(tag): music beside the notch")
         snapshot(c, "\(tag)-wings-music", wait: 0.6)
+        // Claude starts working while the music plays: the music splits off into the drop
+        sm.setNowPlaying(withArt)
+        sm.handleEvent(["hook_event_name": "UserPromptSubmit", "session_id": "drop", "cwd": "/tmp/notch-plus"])
+        check(sm.musicBubble, "\(tag): music moves into the drop while Claude works")
+        snapshot(c, "\(tag)-wings-music-drop", wait: 1.0)
+        sm.sessions = [:]
         c.panel.orderOut(nil)
     }
 
@@ -1465,9 +1680,10 @@ MainActor.assumeIsolated {
         fp.panel?.setFrameOrigin(CGPoint(x: -5000, y: 400)); pump(0.1)
         // let go at the notch: back in
         fp.settle(mouse: CGPoint(x: screen.midX, y: screen.maxY - 10)); pump(0.6)
-        check(!fm2.floatingPlayerOn && !fp.isShown, "floating: let go up at the notch, it goes back in")
+        check(!fm2.floatingPlayerOn && !fp.isShown, "floating: let go up at the notch, it goes back in (on \(fm2.floatingPlayerOn), shown \(fp.isShown))")
         // let go in the middle of the screen: it stays, and clings to a close edge
         fm2.floatingPlayerOn = true; pump(0.4)
+        fm2.floatingCompact = false; pump(0.6)
         let cs0 = FloatingPlayerController.contentSize(compact: false), ws0 = FloatingPlayerController.windowSize(compact: false)
         let nearEdge = CGRect(x: screen.minX - (ws0.width - cs0.width) / 2 + 9, y: screen.midY, width: ws0.width, height: ws0.height)
         let snap0 = fp.snapped(nearEdge)
@@ -1477,6 +1693,24 @@ MainActor.assumeIsolated {
         check(abs(fp.panel!.frame.width - FloatingPlayerController.windowSize(compact: true).width) < 1, "floating: the small version shrinks the window")
         fm2.floatingCompact = false; pump(0.6)
         check(abs(fp.panel!.frame.width - FloatingPlayerController.windowSize(compact: false).width) < 1, "floating: and goes back to full size")
+        // three sizes: a double click steps small, medium, large and back to small
+        fm2.floatingSize = .compact
+        fm2.nextFloatingSize(); pump(0.6)
+        check(fm2.floatingSize == .full && abs(fp.panel!.frame.width - FloatingPlayerController.windowSize(.full).width) < 1, "floating: a double click makes it medium")
+        fm2.nextFloatingSize(); pump(0.8)
+        check(fm2.floatingSize == .large && abs(fp.panel!.frame.height - FloatingPlayerController.windowSize(.large).height) < 1, "floating: the next one makes it large")
+        for (n, sz) in [("small", NotchModel.FloatingSize.compact), ("medium", .full), ("large", .large)] {
+            fm2.floatingSize = sz
+            let r = ImageRenderer(content: FloatingPlayerView(model: fm2, close: {})
+                .background(LinearGradient(colors: [Color(red: 0.2, green: 0.3, blue: 0.5), Color(red: 0.55, green: 0.36, blue: 0.48)], startPoint: .topLeading, endPoint: .bottomTrailing)))
+            r.scale = 2
+            if let img = r.cgImage { try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?.write(to: snapDir.appendingPathComponent("floating-\(n).png")) }
+        }
+        fm2.floatingSize = .large; pump(0.5)
+        fm2.nextFloatingSize(); pump(0.6)
+        check(fm2.floatingSize == .compact && abs(fp.panel!.frame.height - FloatingPlayerController.windowSize(.compact).height) < 1, "floating: the third goes back to small")
+        fm2.defaults.removeObject(forKey: "floatingSize"); fm2.defaults.set(false, forKey: "floatingCompact")
+        check(fm2.floatingSize == .full, "floating: a saved choice from before the third size is kept")
         fm2.floatingPlayerOn = false; pump(0.6)
         check(!fp.isShown, "floating: switched off, it goes")
         fm2.defaults.set(-9000.0, forKey: "floatingPlayerX")
@@ -1619,6 +1853,285 @@ MainActor.assumeIsolated {
         km.startAsking(km.shelf.items[0])
         check(km.asking == nil, "ask: a file of another kind has no question box")
         kc.panel.orderOut(nil)
+    }
+
+    // the waiting nudge
+    do {
+        let nd = UserDefaults(suiteName: "notchplus.tests.nudge")!
+        nd.removePersistentDomain(forName: "notchplus.tests.nudge")
+        let nm = NotchModel(rules: NotificationRules(defaults: nd), defaults: nd,
+                            shelf: ShelfStore(file: askDir.appendingPathComponent("nudge-shelf.json")))
+        let conn = HookConnection(NWConnection(host: "127.0.0.1", port: 9, using: .tcp))
+        let t0 = Date()
+        check(nm.nudgeAfterMinutes == 3, "nudge: three minutes by default")
+        check(!nm.isNudging(at: t0.addingTimeInterval(3600)), "nudge: nothing pending, nothing to remind")
+        nm.handle(json: ["tool_name": "Bash", "session_id": "n1", "tool_input": ["command": "ls"], "cwd": "/tmp"], connection: conn)
+        check(!nm.isNudging(at: t0.addingTimeInterval(120)), "nudge: two minutes is still fine")
+        check(nm.isNudging(at: t0.addingTimeInterval(190)), "nudge: after three minutes Claude has waited long")
+        nm.nudgePulse(at: t0.addingTimeInterval(190))
+        check(nm.pulsing, "nudge: the island pulses")
+        nm.pulsing = false
+        nm.nudgePulse(at: t0.addingTimeInterval(200))
+        check(!nm.pulsing, "nudge: not again within 30 seconds")
+        nm.nudgePulse(at: t0.addingTimeInterval(230))
+        check(nm.pulsing, "nudge: again after 30 seconds")
+        nm.pulsing = false
+        nm.nudgeAfterMinutes = 0
+        check(!nm.isNudging(at: t0.addingTimeInterval(3600)), "nudge: the switch turns it off")
+        nm.nudgeAfterMinutes = 99
+        check(nm.nudgeAfterMinutes == 30, "nudge: at most 30 minutes")
+        nm.nudgeAfterMinutes = 1
+        nm.answer(allow: true)
+        check(!nm.isNudging(at: t0.addingTimeInterval(3600)), "nudge: answering clears it")
+        nm.macReturned()
+        check(!nm.pulsing, "nudge: coming back with nothing waiting does nothing")
+        // answered in the terminal: the hook stays open, but Claude reports the tool finished
+        nm.handle(json: ["tool_name": "AskUserQuestion", "session_id": "n2", "tool_input": ["questions": [["question": "Q?", "header": "H", "options": [["label": "A", "description": "a"], ["label": "B", "description": "b"]]]]], "cwd": "/tmp"], connection: conn)
+        nm.handleEvent(["hook_event_name": "PostToolUse", "session_id": "other", "tool_name": "AskUserQuestion"])
+        check(nm.pending.count == 1, "terminal answer: another session's event leaves the card")
+        nm.handleEvent(["hook_event_name": "PostToolUse", "session_id": "n2", "tool_name": "Bash", "tool_input": ["command": "ls"]])
+        check(nm.pending.count == 1, "terminal answer: another tool finishing leaves the card")
+        nm.handleEvent(["hook_event_name": "PostToolUse", "session_id": "n2", "tool_name": "AskUserQuestion"])
+        check(nm.pending.isEmpty, "terminal answer: the card closes when that tool finishes")
+        nm.handle(json: ["tool_name": "Bash", "session_id": "n3", "tool_input": ["command": "ls"], "cwd": "/tmp"], connection: conn)
+        nm.handleEvent(["hook_event_name": "Stop", "session_id": "n3"])
+        check(nm.pending.isEmpty, "terminal answer: the card closes when the turn ends")
+    }
+
+    // lyrics and the song list from Music
+    do {
+        let raw = "[00:00.00] ...[00:24.62] Sometimes I need to remember just to breathe[00:30.11] [00:29.85] Sometimes I need you to stay away from me[00:34.93] [00:35.35] Sometimes I'm in disbelief, I didn't know\r[01:02.5] (Just give me myself back)"
+        let lines = LyricsParser.parse(raw)
+        check(lines.count == 5, "lyrics: empty stamps are dropped (got \(lines.count))")
+        check(lines[1].time == 24.62 && lines[1].text == "Sometimes I need to remember just to breathe", "lyrics: a line keeps its time and words")
+        check(lines.map { $0.time ?? 0 } == lines.map { $0.time ?? 0 }.sorted(), "lyrics: lines are in time order")
+        check(LyricsParser.current(in: lines, at: 31) == 2, "lyrics: at 31 seconds the second line is sung")
+        check(LyricsParser.current(in: lines, at: 0.0) == 0 && LyricsParser.current(in: lines, at: 500) == 4, "lyrics: first at the start, last at the end")
+        let plain = LyricsParser.parse("one\ntwo\n\nthree")
+        check(plain.count == 3 && plain.allSatisfy { $0.time == nil } && LyricsParser.current(in: plain, at: 20) == nil, "lyrics: plain words have no time and no sung line")
+        check(LyricsParser.parse("").isEmpty, "lyrics: nothing gives nothing")
+        let answer = "ABC2\nAAA1\tForeword\t13.5\tLinkin Park\tMeteora\nABC2\tDon't Stay\t188,2\tLinkin Park\tMeteora\nCCC3\tSomewhere I Belong\t214"
+        let parsed = MusicLibrary.parseTracks(answer)
+        check(parsed.currentID == "ABC2" && parsed.tracks.count == 3 && parsed.tracks[1].name == "Don't Stay" && abs(parsed.tracks[1].duration - 188.2) < 0.01, "song list: parsed with the playing song's id")
+        check(parsed.tracks[1].artist == "Linkin Park" && parsed.tracks[1].album == "Meteora" && parsed.tracks[2].artist == "", "song list: artist and album come with each song when given")
+        check(MusicLibrary.parseTracks("").tracks.isEmpty, "song list: an empty answer is no list")
+        check(MusicControls.parse("true|false|off\n") == MusicControls(favorited: true, shuffle: false, repeatMode: .off), "controls: star, shuffle and repeat are read")
+        check(MusicControls.parse("false|true|all")?.repeatMode == .all && MusicControls.parse("false|true|one")?.shuffle == true, "controls: repeat all and one")
+        check(MusicControls.parse("") == nil && MusicControls.parse("true|false|sideways") == nil, "controls: an unclear answer shows no buttons")
+        check(MusicControls.Repeat.off.next == .all && MusicControls.Repeat.all.next == .one && MusicControls.Repeat.one.next == .off, "controls: repeat goes off, all, one, off")
+        let panelsView = ZStack {
+            LinearGradient(colors: [Color(red: 0.12, green: 0.08, blue: 0.07), Color(red: 0.35, green: 0.2, blue: 0.1)], startPoint: .top, endPoint: .bottom)
+            HStack(spacing: 0) {
+                LyricsView(lines: lines, now: { 31 }, accent: .orange).frame(width: 300, height: 236)
+                TrackListView(tracks: parsed.tracks, currentID: "ABC2", accent: .orange, isPlaying: false, cover: NSImage(size: NSSize(width: 40, height: 40), flipped: false) { r in NSColor.brown.setFill(); r.fill(); return true }) { _ in }.frame(width: 300, height: 236)
+            }
+        }.frame(width: 600, height: 236).environment(\.colorScheme, .dark)
+        let host = NSHostingView(rootView: panelsView)
+        host.frame = CGRect(x: 0, y: 0, width: 600, height: 236)
+        let win = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        win.contentView = host; win.setFrameOrigin(CGPoint(x: -7000, y: 200)); win.orderFront(nil)
+        pump(0.8)
+        if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: snapDir.appendingPathComponent("music-panels.png"))
+        }
+        win.orderOut(nil)
+    }
+
+    // song change peek and swipe to skip
+    do {
+        var sx = SwipeTracker()
+        check(sx.feed(dx: -20, dy: 0, began: true, ended: false) == nil, "swipe skip: a short sideways movement does nothing")
+        check(sx.feed(dx: -30, dy: 2, began: false, ended: false) == .left, "swipe skip: fingers left gives left")
+        check(sx.feed(dx: -50, dy: 0, began: false, ended: false) == nil, "swipe skip: once per swipe")
+        _ = sx.feed(dx: 0, dy: 0, began: false, ended: true)
+        check(sx.feed(dx: 45, dy: 3, began: true, ended: false) == .right, "swipe skip: fingers right gives right")
+        _ = sx.feed(dx: 0, dy: 0, began: false, ended: true)
+        check(sx.feed(dx: -45, dy: 40, began: true, ended: false) != .left, "swipe skip: a slanted scroll never skips")
+        var sv = SwipeTracker()
+        check(sv.feed(dx: 3, dy: 20, began: true, ended: false) == .down, "swipe skip: a mostly vertical swipe still opens")
+        let pd = UserDefaults(suiteName: "notchplus.tests.peek")!
+        pd.removePersistentDomain(forName: "notchplus.tests.peek")
+        let pm = NotchModel(rules: NotificationRules(defaults: pd), defaults: pd, shelf: ShelfStore(file: askDir.appendingPathComponent("peek-shelf.json")))
+        func song(_ t: String, _ a: String = "Artist", playing: Bool = true) -> NowPlayingInfo {
+            var n = playingInfo; n.title = t; n.artist = a; n.playing = playing; return n
+        }
+        pm.setNowPlaying(song("One"))
+        check(pm.songPeek == nil, "peek: the first song shows no peek")
+        pm.setNowPlaying(song("One"))
+        check(pm.songPeek == nil, "peek: the same song again (a position update) shows none")
+        pm.setNowPlaying(song("Two"))
+        check(pm.songPeek == NotchModel.SongPeek(title: "Two", artist: "Artist"), "peek: a new song shows its name")
+        check(pm.wingsWidth == 195, "peek: the wings open wider for it")
+        pump(2.9)
+        check(pm.songPeek == nil && pm.wingsWidth == 50, "peek: it goes away by itself")
+        pm.showSongPeek = false
+        pm.setNowPlaying(song("Three"))
+        check(pm.songPeek == nil, "peek: switched off, no peek")
+        pm.showSongPeek = true
+        pm.setNowPlaying(song("Four", playing: false))
+        check(pm.songPeek == nil, "peek: a paused change shows none")
+        pm.setNowPlaying(nil); pm.setNowPlaying(song("Five"))
+        check(pm.songPeek == nil, "peek: after nothing was playing it is a fresh start, no peek")
+        var sent: [MediaCommand] = []
+        pm.mediaSend = { sent.append($0) }
+        pm.skipBySwipe(next: true)
+        check(sent == [.next], "swipe skip: right is next")
+        pm.skipBySwipe(next: false)
+        check(sent == [.next], "swipe skip: a second skip within half a second is ignored")
+        pm.rewindSwipeClockForTests()
+        pm.skipBySwipe(next: false)
+        check(sent == [.next, .previous], "swipe skip: left is previous")
+        do {
+            let pc = NotchWindowController(model: pm, geometry: .fake(notch: true), liveMouse: false, openSettings: {})
+            pm.setNowPlaying(song("Easier To Run", "Linkin Park"))
+            pm.setNowPlaying(song("Somewhere I Belong", "Linkin Park"))
+            snapshot(pc, "song-peek", wait: 0.7)
+            snapshot(pc, "song-peek-after", wait: 2.6)
+            pc.panel.orderOut(nil)
+        }
+        pm.hovering = true; pm.rewindSwipeClockForTests(); pm.skipBySwipe(next: true)
+        check(sent.count == 3, "swipe skip: it works on the open player too (pointing at the notch opens it)")
+        pm.homeChoice = .shelf; pm.rewindSwipeClockForTests(); pm.skipBySwipe(next: true)
+        check(sent.count == 3, "swipe skip: not on the shelf")
+        pm.homeChoice = nil
+        pm.hovering = false; pm.swipeSkips = false; pm.rewindSwipeClockForTests(); pm.skipBySwipe(next: true)
+        check(sent.count == 3, "swipe skip: the switch turns it off")
+    }
+
+    do {   // the Translate menu shows a short list first
+        let all = Translator.languages.map(\.id)
+        let f = Translator.favourites(from: all, preferred: ["ar-US", "en-US"])
+        check(f.prefix(2) == ["ar", "en"] && f.count == 6 && Set(f).count == 6, "translate menu: the Mac's own languages come first, six in all")
+        check(Translator.favourites(from: all, preferred: []).first == "en" && Translator.favourites(from: ["fr", "de"], preferred: ["xx"]) == ["fr", "de"], "translate menu: English by default, only languages that exist")
+        check(Translator.favourites(from: all, preferred: ["pt_BR"]).first == "pt", "translate menu: a region suffix is ignored")
+    }
+
+    do {   // the thin line over the cover picks dark or light from the cover's bottom edge
+        func solid(_ c: NSColor) -> NSImage { NSImage(size: NSSize(width: 40, height: 40), flipped: false) { r in c.setFill(); r.fill(); return true } }
+        check(ImageColor.bottomIsLight(of: solid(.white), key: "t-white"), "cover line: a white cover gets a dark line")
+        check(!ImageColor.bottomIsLight(of: solid(.black), key: "t-black"), "cover line: a black cover gets a white line")
+        let split = NSImage(size: NSSize(width: 40, height: 40), flipped: false) { r in
+            NSColor.black.setFill(); r.fill()                                  // dark on top
+            NSColor.white.setFill(); NSRect(x: 0, y: 0, width: 40, height: 12).fill()   // light along the bottom (not flipped: y 0 is the bottom)
+            return true
+        }
+        check(ImageColor.bottomIsLight(of: split, key: "t-split"), "cover line: only the bottom edge decides")
+    }
+
+    do {   // a long answer from Ask must show whole
+        let ld = UserDefaults(suiteName: "notchplus.tests.longask")!
+        ld.removePersistentDomain(forName: "notchplus.tests.longask")
+        let lm = NotchModel(rules: NotificationRules(defaults: ld), defaults: ld, shelf: ShelfStore(file: askDir.appendingPathComponent("longask-shelf.json")))
+        _ = lm.shelf.add([askText])
+        let lc = NotchWindowController(model: lm, geometry: .fake(notch: true), liveMouse: false, openSettings: {})
+        lm.hovering = true; pump(0.3)
+        lm.startAsking(lm.shelf.items[0])
+        let longAnswer = "Upload Studio. Proof worked (Desktop/Upload Studio), but you said uploading by hand is better for checking, so it is not worth building a whole uploader right now. The next step would be to write the plan down, pick the three most useful checks, and run them against a real file before deciding anything else about the project."
+        lm.asker(for: lm.shelf.items[0])?.engine = { _ in AsyncThrowingStream { c in c.yield(longAnswer); c.finish() } }
+        lm.asker(for: lm.shelf.items[0])?.ask("whats first idea")
+        pump(0.6)
+        snapshot(lc, "ask-long", wait: 0.6)
+        lc.panel.orderOut(nil)
+    }
+
+    do {   // Ask answers are never cut short
+        let long = String(repeating: "A long answer about the file. ", count: 20)
+        check(Intelligence.cleanAnswer(long).count == long.trimmingCharacters(in: .whitespaces).count, "ask: a long answer is not cut at 120 characters")
+        check(Intelligence.cleanAnswer("**Bold** and `code`\n\nSecond paragraph") == "Bold and code\n\nSecond paragraph", "ask: paragraphs are kept, markup is removed")
+        check(Intelligence.clean(long).count == 120 && Intelligence.clean(long).hasSuffix("..."), "summaries are still one short line")
+    }
+
+    do {   // Messages shown at once, from Messages' own database
+        // the words inside a typed-stream blob
+        var blob = Data([0x04, 0x0b]) + Data("streamtyped".utf8) + Data("NSString".utf8) + Data([0x01, 0x94, 0x84, 0x01, 0x2b, 0x0b]) + Data("hello there".utf8) + Data([0x86])
+        check(MessageText.extract(from: blob) == "hello there", "messages: words are read from the attributed body")
+        let longText = String(repeating: "x", count: 300)
+        blob = Data("NSString".utf8) + Data([0x01, 0x94, 0x84, 0x01, 0x2b, 0x81, 0x2c, 0x01]) + Data(longText.utf8)
+        check(MessageText.extract(from: blob) == longText, "messages: a long message uses the two byte length")
+        check(MessageText.extract(from: Data([1, 2, 3])) == nil, "messages: a blob without words gives nothing")
+
+        // contacts
+        let cdir = askDir.appendingPathComponent("contacts"); try? FileManager.default.createDirectory(at: cdir, withIntermediateDirectories: true)
+        let abPath = cdir.appendingPathComponent("AddressBook-v22.abcddb").path
+        try? FileManager.default.removeItem(atPath: abPath)
+        func run(_ db: OpaquePointer?, _ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
+        var ab: OpaquePointer?
+        sqlite3_open(abPath, &ab)
+        run(ab, "CREATE TABLE ZABCDRECORD (Z_PK INTEGER PRIMARY KEY, ZFIRSTNAME TEXT, ZLASTNAME TEXT, ZNICKNAME TEXT, ZORGANIZATION TEXT);")
+        run(ab, "CREATE TABLE ZABCDPHONENUMBER (ZOWNER INTEGER, ZFULLNUMBER TEXT); CREATE TABLE ZABCDEMAILADDRESS (ZOWNER INTEGER, ZADDRESS TEXT);")
+        run(ab, "INSERT INTO ZABCDRECORD VALUES (1, 'Mum', NULL, NULL, NULL), (2, 'Sam', 'Okafor', NULL, NULL), (3, NULL, NULL, NULL, 'Acme Ltd');")
+        run(ab, "INSERT INTO ZABCDPHONENUMBER VALUES (1, '+44 7700 900123'), (3, '(555) 010-9999'); INSERT INTO ZABCDEMAILADDRESS VALUES (2, 'Sam@Example.com');")
+        sqlite3_close(ab)
+        let names = ContactNames(paths: { [abPath] })
+        check(names.name(for: "+447700900123") == "Mum", "contacts: a phone number finds its name whatever the formatting")
+        check(names.name(for: "sam@example.com") == "Sam Okafor", "contacts: an email finds its name, ignoring case")
+        check(names.name(for: "5550109999") == "Acme Ltd", "contacts: a company name is used when there is no person name")
+        check(names.name(for: "+15559998888") == nil && names.name(for: "12") == nil, "contacts: an unknown number has no name")
+
+        // Messages' database
+        let mpath = cdir.appendingPathComponent("chat.db").path
+        for ext in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: mpath + ext) }
+        var md: OpaquePointer?
+        sqlite3_open(mpath, &md)
+        run(md, """
+            CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB, handle_id INTEGER, is_from_me INTEGER, date_read INTEGER,
+                                  associated_message_type INTEGER, item_type INTEGER, is_system_message INTEGER);
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, style INTEGER, display_name TEXT, chat_identifier TEXT, is_filtered INTEGER, is_blackholed INTEGER);
+            CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+            INSERT INTO handle VALUES (1, '+447700900123'), (2, 'stranger@example.com');
+            INSERT INTO chat VALUES (1, 45, '', '+447700900123', 0, 0), (2, 45, '', 'stranger@example.com', 1, 0), (3, 43, 'Family', 'chat123', 0, 0);
+            INSERT INTO message VALUES (1, 'OLD', 'before we started', NULL, 1, 0, 0, 0, 0, 0);
+            INSERT INTO chat_message_join VALUES (1, 1);
+            """)
+        let watcher = MessagesWatcher(path: mpath, contacts: names)
+        check(watcher.open() && watcher.lastRowID == 1, "messages: it starts after the newest message")
+        check(watcher.readNew().isEmpty, "messages: nothing new, nothing shown")
+        run(md, """
+            INSERT INTO message VALUES (2, 'G2', 'Dinner at 8?', NULL, 1, 0, 0, 0, 0, 0);
+            INSERT INTO chat_message_join VALUES (1, 2);
+            INSERT INTO message VALUES (3, 'G3', 'my own', NULL, 1, 1, 0, 0, 0, 0);
+            INSERT INTO chat_message_join VALUES (1, 3);
+            INSERT INTO message VALUES (4, 'G4', 'Loved "Dinner at 8?"', NULL, 1, 0, 0, 2000, 0, 0);
+            INSERT INTO chat_message_join VALUES (1, 4);
+            INSERT INTO message VALUES (5, 'G5', 'already read elsewhere', NULL, 1, 0, 777, 0, 0, 0);
+            INSERT INTO chat_message_join VALUES (1, 5);
+            INSERT INTO message VALUES (6, 'G6', 'unknown sender', NULL, 2, 0, 0, 0, 0, 0);
+            INSERT INTO chat_message_join VALUES (2, 6);
+            INSERT INTO message VALUES (7, 'G7', 'Pizza?', NULL, 1, 0, 0, 0, 0, 0);
+            INSERT INTO chat_message_join VALUES (3, 7);
+            """)
+        let got = watcher.readNew()
+        check(got.count == 2 && got[0].body == "Dinner at 8?" && got[1].body == "Pizza?", "messages: only real, unread, wanted messages are shown (not mine, reactions, read, filtered)")
+        check(got[0].title == "Mum" && got[0].guid == "G2" && got[0].thread == "any;-;+447700900123" && got[0].bundleID == "com.apple.MobileSMS", "messages: it says who, carries the id, and can be replied to")
+        check(got[1].thread == nil && got[1].subtitle == "Family", "messages: a group message names the group and has no quick reply")
+        check(watcher.lastRowID == 7 && watcher.readNew().isEmpty, "messages: each message is shown once")
+        // a message whose conversation is not stored yet is waited for
+        run(md, "INSERT INTO message VALUES (8, 'G8', 'late join', NULL, 1, 0, 0, 0, 0, 0);")
+        let t0 = Date()
+        check(watcher.readNew(now: t0).isEmpty && watcher.lastRowID == 7, "messages: it waits for the conversation to be stored")
+        run(md, "INSERT INTO chat_message_join VALUES (1, 8);")
+        check(watcher.readNew(now: t0.addingTimeInterval(1)).first?.body == "late join", "messages: and shows it as soon as it is")
+        // one that never gets a conversation is dropped after a few seconds, and does not block the next
+        run(md, "INSERT INTO message VALUES (9, 'G9', 'orphan', NULL, 1, 0, 0, 0, 0, 0);")
+        let t1 = Date()
+        check(watcher.readNew(now: t1).isEmpty, "messages: an orphan is waited for")
+        run(md, "INSERT INTO message VALUES (10, 'G10', 'after the orphan', NULL, 1, 0, 0, 0, 0, 0); INSERT INTO chat_message_join VALUES (1, 10);")
+        check(watcher.readNew(now: t1.addingTimeInterval(7)).map(\.body) == ["after the orphan"], "messages: after a few seconds the orphan is dropped and the next one shows")
+        sqlite3_close(md)
+
+        // the same message from the database and from macOS's notification record: shown once
+        let gd = UserDefaults(suiteName: "notchplus.tests.guid")!
+        gd.removePersistentDomain(forName: "notchplus.tests.guid")
+        let gm = NotchModel(rules: NotificationRules(defaults: gd), defaults: gd, shelf: ShelfStore(file: cdir.appendingPathComponent("guid-shelf.json")))
+        gm.respectFocus = false
+        check(gm.instantMessages, "messages: shown at once by default")
+        gm.receive([RawNotification(recordID: -2, bundleID: "com.apple.MobileSMS", title: "Mum", subtitle: nil, body: "Dinner at 8?", date: Date(), thread: "any;-;+447700900123", guid: "G2")])
+        gm.receive([RawNotification(recordID: 901, bundleID: "com.apple.mobilesms", title: "Mum", subtitle: nil, body: "Dinner at 8?", date: Date(), thread: "any;-;+447700900123", guid: "G2")])
+        check(gm.notifications.count == 1, "messages: the late macOS record of the same message is skipped")
+        gm.receive([RawNotification(recordID: 902, bundleID: "com.apple.mobilesms", title: "Mum", subtitle: nil, body: "Dinner at 8?", date: Date(), thread: nil, guid: nil)])
+        check(gm.notifications.count == 2, "messages: notifications without an id are never skipped")
     }
 
     print("")
