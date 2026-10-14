@@ -90,10 +90,11 @@ Get **Notch-Plus-0.2.dmg** from the [latest release](https://github.com/Nurik-dz
 
 ```bash
 brew tap Nurik-dz/notch-plus https://github.com/Nurik-dz/notch-plus
+brew trust nurik-dz/notch-plus
 brew install --cask notch-plus
 ```
 
-The cask clears the quarantine flag for you, so there is no warning.
+Newer Homebrew asks you to trust a third-party tap before it loads anything from it, which is what the `brew trust` line does (older versions do not need it). The cask clears the quarantine flag for you, so there is no warning.
 
 ### Build it yourself
 
