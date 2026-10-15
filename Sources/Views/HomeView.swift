@@ -8,21 +8,46 @@ struct HomeView: View {
     let geometry: NotchGeometry
     let openSettings: () -> Void
 
+    @Namespace private var glassSpace
+    /// Each pane's own height once it has been shown, so the layout follows the pane you are on, not the one leaving.
+    @State private var paneHeights: [NotchModel.HomeTab: CGFloat] = [:]
+
     var body: some View {
         VStack(spacing: 10) {
             header.rise(0)
+            panes.rise(1)
+        }
+        .padding(.bottom, 14)
+        .contentShape(Rectangle())
+        .dropDestination(for: URL.self) { urls, _ in model.dropFiles(urls) } isTargeted: { model.dropTargeted = $0 }
+    }
+
+    /// The pane for the chosen tab. When the tab changes, the old pane slides and blurs out toward its side while the new one
+    /// comes in from the other; only the new pane counts for the island's height, so the island glides to it
+    /// instead of first jumping to the taller of the two.
+    private var panes: some View {
+        let tab = model.homeTab
+        let s = CGFloat(model.homeStep) * (Motion.reduce ? 0 : 26)
+        let swap = AnyTransition.asymmetric(
+            insertion: .modifier(active: PaneSlide(active: true, x: s), identity: PaneSlide(active: false, x: s)),
+            removal: .modifier(active: PaneSlide(active: true, x: -s), identity: PaneSlide(active: false, x: -s)))
+        return ZStack(alignment: .top) {
             Group {
-                switch model.homeTab {
+                switch tab {
                 case .player: PlayerPane(model: model)
                 case .shelf: ShelfPane(model: model, shelf: shelf)
                 case .recent: RecentPane(model: model)
                 }
             }
-            .rise(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                if abs((paneHeights[tab] ?? 0) - h) > 0.5 { paneHeights[tab] = h }
+            }
+            .id(tab)
+            .transition(swap)
         }
-        .padding(.bottom, 14)
-        .contentShape(Rectangle())
-        .dropDestination(for: URL.self) { urls, _ in model.dropFiles(urls) } isTargeted: { model.dropTargeted = $0 }
+        .animation(Motion.tab, value: tab)
+        .frame(height: paneHeights[tab], alignment: .top)     // not animated here: the island's own spring does the gliding
     }
 
     /// The tabs sit beside the physical notch (in the space that used to be empty), the gear on the other side.
@@ -31,13 +56,13 @@ struct HomeView: View {
             // three tabs do not fit with names beside the notch: then all are icons
             let compact = !model.notifications.isEmpty
             TabPill(title: "Player", symbol: "play.circle.fill", selected: model.homeTab == .player,
-                    badge: model.nowPlaying?.playing == true ? Theme.green : nil, iconOnly: compact) { model.homeChoice = .player }
+                    badge: model.nowPlaying?.playing == true ? Theme.green : nil, iconOnly: compact, space: glassSpace) { model.selectTab(.player) }
             TabPill(title: "Shelf", symbol: "tray.fill", selected: model.homeTab == .shelf,
-                    count: shelf.items.count, iconOnly: compact) { model.homeChoice = .shelf }
+                    count: shelf.items.count, iconOnly: compact, space: glassSpace) { model.selectTab(.shelf) }
             // recent notifications, once there are any; the number is the quiet ones not seen yet
             if !model.notifications.isEmpty {
                 TabPill(title: "Recent", symbol: "bell.fill", selected: model.homeTab == .recent,
-                        count: model.quietUnseen, iconOnly: true) { model.openRecent() }
+                        count: model.quietUnseen, iconOnly: true, space: glassSpace) { model.selectTab(.recent) }
             }
         }
         let gear = Button { openSettings() } label: { Image(systemName: "gearshape.fill") }
@@ -125,6 +150,7 @@ private struct TabPill: View {
     var badge: Color?
     var count: Int = 0
     var iconOnly = false
+    let space: Namespace.ID
     let action: () -> Void
 
     var body: some View {
@@ -138,11 +164,13 @@ private struct TabPill: View {
             .foregroundStyle(selected ? .white : Theme.secondary)
             .padding(.horizontal, selected ? 10 : 8).frame(height: 26)
             .glassEffect(selected ? .regular.interactive() : .identity, in: Capsule())
+            // the one lit capsule is one piece of glass that moves from tab to tab
+            .glassEffectID(selected ? "selected" : title, in: space)
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title).accessibilityAddTraits(selected ? .isSelected : [])
-        .animation(Motion.hover, value: selected)
+        .animation(Motion.tab, value: selected)
     }
 }
 
@@ -161,12 +189,9 @@ private struct PlayerPane: View {
                 Text("Play music or a video in any app and it shows up here, with controls.")
                     .font(Theme.text(11.5)).foregroundStyle(Theme.secondary).multilineTextAlignment(.center)
                 Button { MusicLibrary.startPlaying() } label: {
-                    Label("Play from Music", systemImage: "play.fill")
-                        .font(Theme.label(11.5, .semibold)).foregroundStyle(.white)
-                        .padding(.horizontal, 12).frame(height: 28)
-                        .background(Capsule().fill(Color.white.opacity(0.14)))
+                    ChipLabel(title: "Play from Music", symbol: "play.fill", kind: .primary)
                 }
-                .buttonStyle(.plain).hoverLift(1.04).padding(.top, 4)
+                .buttonStyle(.plain).padding(.top, 4)
                 .help("Opens Music and plays where you left off, or shuffles your library")
             }
             .frame(maxWidth: .infinity, minHeight: 96)
@@ -408,8 +433,9 @@ private struct ShelfPane: View {
                 FileBulkBar(model: model, store: shelf).transition(.blurFade)
             }
             HStack(spacing: 10) {
-                Text("\(shelf.items.count) on the shelf  ·  ⌘-click for several")
-                    .font(Theme.label(10)).foregroundStyle(Theme.tertiary).lineLimit(1)
+                Text(single.map { "\($0.name)  ·  \(shelf.items.count) on the shelf" + (shelf.items.count > 1 ? "  ·  ⌘-click for several" : "") }
+                     ?? "\(shelf.items.count) on the shelf  ·  ⌘-click for several")
+                    .font(Theme.label(10)).foregroundStyle(Theme.tertiary).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if shelf.items.count > 1 {
                     Button("Select all") { model.selection.selectAll(shelf.items.map(\.id)) }
@@ -446,13 +472,8 @@ private struct AskPanel: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(suggestions, id: \.self) { s in
-                            Button { asker.ask(s) } label: {
-                                Text(s).font(Theme.label(11.5, .medium)).lineLimit(1)
-                                    .padding(.horizontal, 10).frame(height: 26)
-                                    .background(Capsule().fill(Color.white.opacity(0.1)))
-                                    .foregroundStyle(.white.opacity(0.85))
-                            }
-                            .buttonStyle(.plain).hoverLift(1.04)
+                            Button { asker.ask(s) } label: { ChipLabel(title: s) }
+                                .buttonStyle(.plain)
                         }
                     }
                 }
@@ -529,7 +550,7 @@ struct ShelfActionBar: View {
 
     var body: some View {
         let url = shelf.url(for: item)
-        HStack(spacing: 6) {
+        GlassEffectContainer(spacing: 6) { HStack(spacing: 6) {
             if let job = model.job(for: item.id) {
                 Image(systemName: "sparkles").foregroundStyle(Theme.violet).symbolEffect(.pulse)
                 Text("\(job.verb)… \(job.fraction.map { "\(Int($0 * 100))%" } ?? job.status)")
@@ -537,28 +558,20 @@ struct ShelfActionBar: View {
                 Spacer(minLength: 0)
             } else if let url {
                 let m = FileActions.menu(for: FileKind.of(url))
-                if allowAsk, FileAsker.canAsk(FileKind.of(url)) {
+                let canAsk = allowAsk && FileAsker.canAsk(FileKind.of(url))
+                if canAsk {
                     Button { model.startAsking(item) } label: {
-                        Label("Ask", systemImage: "questionmark.bubble.fill").labelStyle(.titleAndIcon)
-                            .font(Theme.label(11.5, .semibold)).lineLimit(1)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 11).frame(height: 28)
-                            .background(Capsule().fill(LinearGradient(colors: [Theme.blue.opacity(0.75), Theme.violet.opacity(0.75)],
-                                                                      startPoint: .leading, endPoint: .trailing)))
-                            .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 0.8))
+                        ChipLabel(title: "Ask", symbol: "questionmark.bubble.fill", kind: .primary, tint: Theme.blue)
                     }
-                    .buttonStyle(.plain).hoverLift(1.04)
+                    .buttonStyle(.plain)
                     .help("Ask a question about this file. Answered on your Mac.")
                 }
-                ForEach(Array(m.intelligence.prefix(allowAsk && FileAsker.canAsk(FileKind.of(url)) ? 1 : 2))) { a in
+                // one clear first choice: Ask, or when the file cannot be asked about, its first smart action
+                ForEach(Array(m.intelligence.prefix(canAsk ? 1 : 2).enumerated()), id: \.element.id) { i, a in
                     Button { model.startAction(a.id, on: item) } label: {
-                        Label(a.title, systemImage: a.symbol).labelStyle(.titleAndIcon)
-                            .font(Theme.label(11.5, .semibold)).lineLimit(1)
-                            .padding(.horizontal, 10).frame(height: 28)
-                            .background(Capsule().fill(Theme.violet.opacity(0.22)))
-                            .overlay(Capsule().strokeBorder(Theme.violet.opacity(0.5), lineWidth: 0.8))
+                        ChipLabel(title: a.title, symbol: a.symbol, kind: !canAsk && i == 0 ? .primary : .secondary)
                     }
-                    .buttonStyle(.plain).hoverLift(1.04)
+                    .buttonStyle(.plain)
                 }
                 Menu {
                     ForEach(Array(m.intelligence.dropFirst(allowAsk && FileAsker.canAsk(FileKind.of(url)) ? 1 : 2))) { a in
@@ -578,25 +591,17 @@ struct ShelfActionBar: View {
                     Button("Copy path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.path, forType: .string) }
                     Button("Remove from shelf") { shelf.remove(item.id) }
                 } label: {
-                    HStack(spacing: 4) {
-                        Text("More").font(Theme.label(11.5, .semibold))
-                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
-                    }
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 10).frame(height: 28)
-                    .background(Capsule().fill(Color.white.opacity(0.1)))
+                    ChipLabel(title: "More", menu: true)
                 }
                 .menuStyle(.button).menuIndicator(.hidden).buttonStyle(.plain).fixedSize()
                 Spacer(minLength: 0)
-                Text(item.name).font(Theme.label(10.5)).foregroundStyle(Theme.secondary)
-                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: 130, alignment: .trailing)
             } else {
                 Image(systemName: "questionmark.folder").foregroundStyle(Theme.tertiary)
                 Text("This file is no longer there").font(Theme.label(12)).foregroundStyle(Theme.secondary)
                 Spacer(minLength: 0)
                 Button("Remove") { shelf.remove(item.id) }.buttonStyle(.plain).font(Theme.label(11.5, .semibold)).foregroundStyle(Theme.secondary)
             }
-        }
+        } }
         .frame(height: 30)
     }
 }

@@ -10,7 +10,6 @@ struct GlowRim<S: Shape>: View {
     let strength: Double
     /// Seconds for the colours to travel one full width.
     var period: Double = 9
-
     private var palette: [Color] {
         let base: [Color] = [
             Color(red: 0.30, green: 0.52, blue: 1.00),   // blue

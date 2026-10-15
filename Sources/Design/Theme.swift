@@ -55,6 +55,8 @@ enum Motion {
     static var hover: Animation { .easeOut(duration: 0.16) }
     /// Cards swapping places.
     static var content: Animation { reduce ? .easeOut(duration: 0.15) : .smooth(duration: 0.38) }
+    /// Moving between the player, the shelf and the recent list: the pills and the pane settle together.
+    static var tab: Animation { reduce ? .easeOut(duration: 0.15) : .spring(response: 0.38, dampingFraction: 0.86) }
     /// Parts of a card arriving one after another.
     static func rise(_ index: Int) -> Animation {
         reduce ? .easeOut(duration: 0.15) : .spring(response: 0.46, dampingFraction: 0.86).delay(0.06 + 0.045 * Double(index))
@@ -237,6 +239,20 @@ struct BlurFade: ViewModifier {
 extension AnyTransition {
     static var blurFade: AnyTransition {
         .modifier(active: BlurFade(active: true), identity: BlurFade(active: false))
+    }
+}
+
+/// A pane of the open island changing places with another: it slides a little toward where the other tab is,
+/// blurring and fading, so the two read as neighbours (`x` is zero for a change nobody pointed at).
+struct PaneSlide: ViewModifier {
+    let active: Bool
+    let x: CGFloat
+    func body(content: Content) -> some View {
+        content
+            .offset(x: active ? x : 0)
+            .blur(radius: active ? 8 : 0)
+            .opacity(active ? 0 : 1)
+            .scaleEffect(active && x == 0 ? 0.96 : 1, anchor: .top)
     }
 }
 

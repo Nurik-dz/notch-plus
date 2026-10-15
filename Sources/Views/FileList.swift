@@ -125,7 +125,7 @@ struct FileBulkBar: View {
 
     var body: some View {
         let n = items.count
-        HStack(spacing: 6) {
+        GlassEffectContainer(spacing: 6) { HStack(spacing: 6) {
             if let job = model.jobs.last(where: { j in items.contains { $0.id == j.itemID } }) {
                 Image(systemName: "sparkles").foregroundStyle(Theme.violet).symbolEffect(.pulse)
                 Text("\(job.verb)… \(job.fraction.map { "\(Int($0 * 100))%" } ?? job.status)")
@@ -134,14 +134,8 @@ struct FileBulkBar: View {
             } else {
                 Text("\(n) selected").font(Theme.label(12, .semibold)).foregroundStyle(.white.opacity(0.9)).fixedSize()
                 dragChip(n)
-                Button { model.startZip(items) } label: {
-                    Label("Zip", systemImage: "doc.zipper").labelStyle(.titleAndIcon)
-                        .font(Theme.label(11.5, .semibold))
-                        .padding(.horizontal, 10).frame(height: 28)
-                        .background(Capsule().fill(Theme.violet.opacity(0.22)))
-                        .overlay(Capsule().strokeBorder(Theme.violet.opacity(0.5), lineWidth: 0.8))
-                }
-                .buttonStyle(.plain).hoverLift(1.04)
+                Button { model.startZip(items) } label: { ChipLabel(title: "Zip", symbol: "doc.zipper") }
+                .buttonStyle(.plain)
                 .help("Put the selected files in one zip, next to the first one")
                 Menu {
                     Button("Copy paths") {
@@ -158,28 +152,18 @@ struct FileBulkBar: View {
                         model.selection.clear()
                     }
                 } label: {
-                    HStack(spacing: 4) {
-                        Text("More").font(Theme.label(11.5, .semibold))
-                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
-                    }
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 10).frame(height: 28)
-                    .background(Capsule().fill(Color.white.opacity(0.1)))
+                    ChipLabel(title: "More", menu: true)
                 }
                 .menuStyle(.button).menuIndicator(.hidden).buttonStyle(.plain).fixedSize()
                 Spacer(minLength: 0)
             }
-        }
+        } }
         .frame(height: 30)
     }
 
     /// The handle: drag this and every selected file goes with it.
     private func dragChip(_ n: Int) -> some View {
-        Label("Drag \(n)", systemImage: "arrow.up.forward.square.fill").labelStyle(.titleAndIcon)
-            .font(Theme.label(11.5, .semibold)).foregroundStyle(.white)
-            .padding(.horizontal, 11).frame(height: 28)
-            .background(Capsule().fill(LinearGradient(colors: [Theme.blue.opacity(0.8), Theme.violet.opacity(0.8)], startPoint: .leading, endPoint: .trailing)))
-            .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 0.8))
+        ChipLabel(title: "Drag \(n)", symbol: "arrow.up.forward.square.fill", kind: .primary, tint: Theme.blue)
             .overlay {
                 DragFilesHandle(urls: { urls }) { dropped in
                     model.dragOutEnded(items.map(\.id), droppedSomewhere: dropped)

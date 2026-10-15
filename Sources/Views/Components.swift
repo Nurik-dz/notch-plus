@@ -18,6 +18,8 @@ struct LevelBar: View {
 
 // MARK: - Buttons
 
+/// The decision buttons on the cards (Allow, Deny, Reply...): the same glass as the chips, a little taller.
+/// Colour carries meaning: green allows, red denies or warns, the rest is plain glass.
 struct PillButtonStyle: ButtonStyle {
     enum Kind { case allow, danger, deny, quiet }
     let kind: Kind
@@ -25,47 +27,56 @@ struct PillButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(Theme.label(12.5, .semibold))
-            .foregroundStyle(foreground)
-            .padding(.horizontal, 13)
+            .foregroundStyle(kind == .deny ? Color(red: 1.0, green: 0.62, blue: 0.60) : Color.white)
+            .padding(.horizontal, 14)
             .frame(height: 32)
-            .background {
-                if kind == .allow || kind == .danger { Capsule().fill(glow).blur(radius: 8).offset(y: 3) }
-                Capsule().fill(fill)
-            }
-            .overlay { if kind == .allow || kind == .danger { Capsule().strokeBorder(stroke, lineWidth: 1) } }
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .chipGlass(tint: tint, strength: kind == .deny ? 0.4 : 1)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(Motion.press, value: configuration.isPressed)
-            .hoverLift(1.03)
+    }
+
+    private var tint: Color? {
+        switch kind {
+        case .allow: Theme.green
+        case .danger, .deny: Theme.red
+        case .quiet: nil
+        }
+    }
+}
+
+/// The one button look for actions inside the island: a capsule of glass, 28 high. The main action of a row carries
+/// a tint (`primary`), everything else is plain glass (`secondary`), so every row has one clear first choice.
+/// The glass itself answers the pointer and the press; use it as the label of a plain Button or a Menu.
+struct ChipLabel: View {
+    enum Kind { case primary, secondary }
+    let title: String
+    var symbol: String?
+    var menu = false                       // a chevron, for a button that opens a menu
+    var kind: Kind = .secondary
+    var tint: Color = Theme.violet
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if let symbol { Image(systemName: symbol).font(.system(size: 11, weight: .semibold)) }
+            Text(title).font(Theme.label(11.5, .semibold)).lineLimit(1)
+            if menu { Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).opacity(0.7) }
+        }
+        .foregroundStyle(kind == .primary ? Color.white : .white.opacity(0.88))
+        .padding(.horizontal, 12).frame(height: 28)
+        .chipGlass(tint: kind == .primary ? tint : nil)
+    }
+}
+
+extension View {
+    /// The surface every button in the island shares: a capsule of glass. With a tint it is coloured through and
+    /// through (a wash under the glass, the glass tinted the same, a soft glow); `strength` softens that for a
+    /// quieter button of the same colour.
+    func chipGlass(tint: Color?, strength: Double = 1) -> some View {
+        self
+            .background { if let tint { Capsule().fill(tint.opacity(0.55 * strength)) } }
+            .glassEffect(tint.map { .regular.tint($0.opacity(0.85 * strength)).interactive() } ?? .regular.interactive(), in: Capsule())
+            .shadow(color: tint.map { $0.opacity(0.4 * strength) } ?? .clear, radius: 7, y: 2)
             .contentShape(Capsule())
-    }
-
-    private var foreground: Color {
-        switch kind {
-        case .allow, .danger: .white
-        case .deny: Color(red: 1.0, green: 0.55, blue: 0.52)
-        case .quiet: .white.opacity(0.9)
-        }
-    }
-
-    private var fill: AnyShapeStyle {
-        switch kind {
-        case .allow: AnyShapeStyle(LinearGradient(colors: [Color(red: 0.22, green: 0.80, blue: 0.42), Color(red: 0.12, green: 0.60, blue: 0.31)], startPoint: .top, endPoint: .bottom))
-        case .danger: AnyShapeStyle(LinearGradient(colors: [Color(red: 0.98, green: 0.36, blue: 0.32), Color(red: 0.80, green: 0.2, blue: 0.2)], startPoint: .top, endPoint: .bottom))
-        case .deny: AnyShapeStyle(Theme.red.opacity(0.22))
-        case .quiet: AnyShapeStyle(Color.white.opacity(0.11))
-        }
-    }
-
-    private var stroke: AnyShapeStyle {
-        AnyShapeStyle(LinearGradient(colors: [.white.opacity(0.35), .white.opacity(0.02)], startPoint: .top, endPoint: .bottom))
-    }
-
-    private var glow: Color {
-        switch kind {
-        case .allow: Theme.green.opacity(0.35)
-        case .danger: Theme.red.opacity(0.4)
-        default: .clear
-        }
     }
 }
 

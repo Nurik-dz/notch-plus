@@ -119,12 +119,7 @@ private struct ReplyBox: View {
             if !model.replySuggestions.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(model.replySuggestions, id: \.self) { s in
-                        Button { text = s; focused = true } label: {
-                            Text(s).font(Theme.label(11.5, .medium)).lineLimit(1)
-                                .padding(.horizontal, 10).padding(.vertical, 5)
-                                .background(Capsule().fill(Color.white.opacity(0.09)))
-                                .overlay(Capsule().strokeBorder(Theme.violet.opacity(0.35), lineWidth: 1))
-                        }
+                        Button { text = s; focused = true } label: { ChipLabel(title: s) }
                         .buttonStyle(.plain)
                         .help("Put this in the reply field")
                     }

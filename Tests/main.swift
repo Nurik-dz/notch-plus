@@ -254,8 +254,18 @@ MainActor.assumeIsolated {
             note("Calendar", "com.apple.iCal", "Meeting with Sara", nil, "Starts in 10 minutes", .now, ago: 3000),
         ]
         snapshot(c, "\(tag)-overview-full")
+        // two fingers pulling it open: a third of the way, then most of the way, then a stretch past fully open
         m.hovering = false
         pump(0.5)
+        m.hovering = true; m.pull.active = true
+        for (name, pr) in [("a", 0.25), ("b", 0.55), ("c", 0.85), ("d", 1.12)] as [(String, CGFloat)] {
+            m.pull.progress = pr
+            snapshot(c, "\(tag)-pull-\(name)", wait: 0.35)
+        }
+        m.pull.active = false
+        m.hovering = false
+        pump(0.5)
+        check(m.state == m.restingState && !m.pull.active, "\(tag): after a pull is let go the island is back to its resting state")
 
         // live status beside the notch
         check(m.state == .wings && m.liveSession?.tool == "Bash", "\(tag): Claude working shows live beside the notch")
@@ -974,6 +984,35 @@ MainActor.assumeIsolated {
     check(sw.feed(dy: 30, began: false, ended: false) == nil, "swipe: one swipe fires once")
     _ = sw.feed(dy: 0, began: false, ended: true)
     check(sw.feed(dy: -20, began: true, ended: false) == .up, "swipe: fingers up closes")
+    var pt = PullTracker()
+    pt.begin(open: false, at: 0)
+    check(pt.feed(dy: 6, at: 0.01) == nil && pt.feed(dy: -3, at: 0.02) == nil, "pull: a small movement does not move the island")
+    pt.begin(open: false, at: 0)
+    _ = pt.feed(dy: 12, at: 0.01)
+    let p1 = pt.feed(dy: 33, at: 0.02) ?? -1
+    check(abs(p1 - (35.0 / PullTracker.distance)) < 0.02, "pull: after the dead zone the island follows the fingers one to one")
+    check(PullTracker.display(raw: 0.6) == 0.6 && PullTracker.display(raw: -0.4) == 0, "pull: linear inside, never below closed")
+    let over = PullTracker.display(raw: 1.5)
+    check(over > 1 && over < 1.2 && PullTracker.display(raw: 5) < 1 + PullTracker.stretch, "pull: past fully open it resists like rubber and never passes the stretch")
+    var slow = PullTracker()
+    slow.begin(open: false, at: 0)
+    var t = 0.0, last = 0.0
+    for _ in 0..<12 { t += 0.016; last = slow.feed(dy: 3, at: t) ?? last }       // 36 points: about a third open, then it stops
+    t += 0.3; _ = slow.feed(dy: 0, at: t)
+    check(!slow.shouldOpen, "pull: a slow pull that stops short falls back closed")
+    var flick = PullTracker()
+    flick.begin(open: false, at: 0)
+    t = 0
+    for _ in 0..<6 { t += 0.008; _ = flick.feed(dy: 9, at: t) }                   // 54 points, fast
+    check(flick.shouldOpen, "pull: a quick flick finishes the move open")
+    var closing = PullTracker()
+    closing.begin(open: true, at: 0)
+    t = 0
+    for _ in 0..<6 { t += 0.008; _ = closing.feed(dy: -9, at: t) }
+    check(!closing.shouldOpen, "pull: a quick flick up closes it")
+    var downOpen = PullTracker()
+    downOpen.begin(open: true, at: 0)
+    check(downOpen.feed(dy: 40, at: 0.01) == nil, "pull: pulling down on an open island does nothing (lists keep scrolling)")
     let pw: (Bool, Int) -> PowerState = { PowerState(pluggedIn: $0, percent: $1) }
     check(PowerEvents.next(from: nil, to: pw(true, 80)) == nil, "power: the first reading is not an event")
     check(PowerEvents.next(from: pw(false, 80), to: pw(true, 80)) == .pluggedIn(80), "power: plugging in is an event")

@@ -63,14 +63,16 @@ struct TrackListView: View {
     var fadeAt: CGFloat = 1
     let play: (AlbumTrack) -> Void
 
+    /// Worked out once per draw of the list, never per row.
     private var showCovers: Bool { cover != nil && Set(tracks.map(\.album)).count == 1 }
 
     var body: some View {
+        let covers = showCovers
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 3) {
                     ForEach(Array(tracks.enumerated()), id: \.element.id) { n, t in
-                        row(n, t, now: t.id == currentID).id(t.id)
+                        row(n, t, now: t.id == currentID, covers: covers).id(t.id)
                     }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 190)
@@ -87,10 +89,10 @@ struct TrackListView: View {
         .animation(.easeInOut(duration: 0.4), value: fadeAt)
     }
 
-    private func row(_ n: Int, _ t: AlbumTrack, now: Bool) -> some View {
+    private func row(_ n: Int, _ t: AlbumTrack, now: Bool, covers: Bool) -> some View {
         Button { play(t) } label: {
             HStack(spacing: 11) {
-                lead(n, now: now)
+                lead(n, now: now, covers: covers)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(t.name).font(Theme.label(now ? 15 : 14, now ? .bold : .semibold))
                         .foregroundStyle(now ? Color.white : Color.white.opacity(0.85)).lineLimit(1)
@@ -116,22 +118,21 @@ struct TrackListView: View {
 
     /// The small cover (with the waveform on it for the playing song), or just the number.
     @ViewBuilder
-    private func lead(_ n: Int, now: Bool) -> some View {
-        if showCovers, let cover {
+    private func lead(_ n: Int, now: Bool, covers: Bool) -> some View {
+        if covers, let cover {
             Image(nsImage: cover).resizable().aspectRatio(contentMode: .fill)
                 .frame(width: 38, height: 38)
                 .overlay { if now { Color.black.opacity(0.45) } }
                 .overlay {
                     if now {
-                        Image(systemName: "waveform").font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
-                            .symbolEffect(.variableColor.iterative, isActive: isPlaying)
+                        MiniWave(playing: isPlaying, size: 15)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         } else {
             Group {
                 if now {
-                    Image(systemName: "waveform").foregroundStyle(.white).symbolEffect(.variableColor.iterative, isActive: isPlaying)
+                    MiniWave(playing: isPlaying, size: 15)
                 } else { Text("\(n + 1)").foregroundStyle(Theme.tertiary) }
             }
             .font(now ? Theme.label(15, .bold) : Theme.label(12)).frame(width: 38, height: 38)
@@ -175,5 +176,32 @@ struct MediaSwitches: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain).hoverLift(1.08).accessibilityLabel(label)
+    }
+}
+
+/// The little moving bars on the song that is playing. Drawn in one small canvas ten times a second: the system's
+/// animated waveform symbol redraws far more often, and under the faded list that meant redrawing the whole list.
+struct MiniWave: View {
+    let playing: Bool
+    var size: CGFloat = 15
+    private static let heights: [Double] = [0.55, 1.0, 0.7, 0.9, 0.5]
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.1)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            Canvas { g, canvas in
+                let n = Self.heights.count
+                let gap = canvas.width * 0.09
+                let w = (canvas.width - gap * CGFloat(n - 1)) / CGFloat(n)
+                for i in 0..<n {
+                    let k = Double(i)
+                    let wave = playing && !Motion.reduce ? 0.5 + 0.5 * sin(t * (4.1 + k * 0.9) + k * 1.7) : 0.7
+                    let h = max(w, canvas.height * Self.heights[i] * (0.35 + 0.65 * wave))
+                    let r = CGRect(x: CGFloat(i) * (w + gap), y: (canvas.height - h) / 2, width: w, height: h)
+                    g.fill(Path(roundedRect: r, cornerRadius: w / 2), with: .color(.white))
+                }
+            }
+        }
+        .frame(width: size, height: size)
     }
 }

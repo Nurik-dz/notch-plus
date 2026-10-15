@@ -62,7 +62,7 @@ final class NotchWindowController {
     }
 
     private func installContent() {
-        let host = NSHostingView(rootView: NotchRootView(model: model, geometry: geometry, openSettings: openSettings))
+        let host = NSHostingView(rootView: NotchRootView(model: model, pull: model.pull, geometry: geometry, openSettings: openSettings))
         host.sizingOptions = []
         panel.contentView = host
     }
@@ -133,27 +133,64 @@ final class NotchWindowController {
     }
 
     private var swipe = SwipeTracker()
+    private var pullTracker = PullTracker()
+    private var pullFromOpen = false
+    private var pullPastHalf = false
 
     private func swiped(dx: Double, dy: Double, began: Bool, ended: Bool) {
         let p = NSEvent.mouseLocation
+        let now = ProcessInfo.processInfo.systemUptime
+        let resting = [IslandState.closed, .wings, .overview].contains(model.state) && !model.dragging
         let onIsland = geometry.hotRect.insetBy(dx: -40, dy: -20).contains(p)
             || (model.hovering && geometry.shapeRect(.overview, height: model.contentHeights[.overview]).contains(p))
-        guard onIsland else { _ = swipe.feed(dy: 0, began: began, ended: true); return }
-        guard let s = swipe.feed(dx: dx, dy: dy, began: began, ended: ended) else { return }
+
+        // Up and down: the island follows the two fingers, then finishes the move on release.
+        if began {
+            if pullTracker.active { finishPull() }
+            pullTracker.begin(open: model.hovering, at: now)
+            pullFromOpen = model.hovering
+        }
+        if resting, onIsland || pullTracker.active {
+            if let progress = pullTracker.feed(dy: dy, at: now) {
+                if !model.pull.active {
+                    // the pull has started: open the overview underneath, at the size it is now
+                    openWork?.cancel(); openWork = nil
+                    closeWork?.cancel(); closeWork = nil
+                    model.anticipating = false
+                    model.pull.progress = pullFromOpen ? 1 : 0
+                    model.pull.active = true
+                    model.hovering = true
+                    pullPastHalf = pullFromOpen
+                }
+                model.pull.progress = CGFloat(progress)
+                let past = progress > 0.5
+                if past != pullPastHalf {
+                    pullPastHalf = past
+                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                }
+            }
+        }
+        if ended, pullTracker.active { finishPull() }
+        else if ended { pullTracker.end() }
+
+        // Sideways: skip the song (only over the closed notch, as before).
+        guard onIsland, !model.pull.active else { _ = swipe.feed(dy: 0, began: began, ended: true); return }
+        guard let s = swipe.feed(dx: dx, dy: 0, began: began, ended: ended) else { return }
         switch s {
         case .left where model.swipeSkips, .right where model.swipeSkips:
             model.skipBySwipe(next: s == .right)
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-        case .down where !model.hovering:
-            openWork?.cancel(); openWork = nil
-            model.anticipating = false
-            model.hovering = true
-            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-        case .up where model.hovering:
-            closeWork?.cancel(); closeWork = nil
-            model.hovering = false
         default: break
         }
+    }
+
+    /// The fingers lifted: where the island would coast to decides open or closed.
+    private func finishPull() {
+        let open = pullTracker.shouldOpen
+        pullTracker.end()
+        model.pull.active = false
+        model.hovering = open
+        if !open { closeWork?.cancel(); closeWork = nil }
     }
 
     private func pointerMoved() {

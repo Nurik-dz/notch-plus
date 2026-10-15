@@ -6,13 +6,15 @@ private struct Jelly: ViewModifier {
     struct Value { var x = 1.0, y = 1.0 }
     let trigger: IslandState
     let open: Bool
+    /// 0 while two fingers are pulling the island (it already follows them), 1 otherwise.
+    let amount: Double
 
     func body(content: Content) -> some View {
         if Motion.reduce {
             content
         } else {
             content.keyframeAnimator(initialValue: Value(), trigger: trigger) { view, v in
-                view.scaleEffect(x: v.x, y: v.y, anchor: .top)
+                view.scaleEffect(x: 1 + (v.x - 1) * amount, y: 1 + (v.y - 1) * amount, anchor: .top)
             } keyframes: { _ in
                 KeyframeTrack(\.y) {
                     CubicKeyframe(open ? 1.035 : 0.985, duration: 0.14)
@@ -31,6 +33,7 @@ private struct Jelly: ViewModifier {
 /// with the card for the current state inside.
 struct NotchRootView: View {
     @ObservedObject var model: NotchModel
+    @ObservedObject var pull: PullState
     let geometry: NotchGeometry
     let openSettings: () -> Void
 
@@ -77,12 +80,17 @@ struct NotchRootView: View {
         let open = model.isOpen
         let rim = open || state == .wings
         let wingW = model.wingsWidth
-        let size = geometry.shapeSize(state, height: model.contentHeights[state], anticipating: model.anticipating, wing: wingW)
-        let flare = open ? Self.flareOpen : Self.flareClosed
-        let shape = NotchShape(topRadius: flare, bottomRadius: open ? 32 : 14)
+        // Two fingers pulling: the island follows them, sized between what it is at rest and fully open.
+        let pulling = pull.active && state == .overview
+        let p = pulling ? pull.progress : 1
+        let k = Double(min(max(p, 0), 1))                 // how open it looks, 0 to 1 (the stretch past 1 only grows it taller)
+        let size = islandSize(state: state, wing: wingW, pulling: pulling, p: p, k: CGFloat(k))
+        let openness = open ? (pulling ? k : 1) : 0
+        let flare = Self.flareClosed + (Self.flareOpen - Self.flareClosed) * openness
+        let shape = NotchShape(topRadius: flare, bottomRadius: 14 + 18 * openness)
         let light = accent
         // the living edge light: full on open cards, gentle while Claude or a file action is working, off otherwise
-        let glow: Double = (open ? 1 : ((state == .wings && (model.liveSession != nil || !model.jobs.isEmpty)) ? 0.55 : 0)) * model.glowLevel.factor * (Motion.lessTransparency ? 0.35 : 1)
+        let glow: Double = (open ? openness : ((state == .wings && (model.liveSession != nil || !model.jobs.isEmpty)) ? 0.55 : 0)) * model.glowLevel.factor * (Motion.lessTransparency ? 0.35 : 1)
         // black like the hardware notch unless Liquid Glass is chosen in Settings
         let glassy = open && model.islandStyle == .glass && !Motion.lessTransparency
         let bubble = model.musicBubble
@@ -97,7 +105,8 @@ struct NotchRootView: View {
                          dropX: bubbleX, dropY: bubbleY, dropSize: bubble ? Self.bubbleSize : Self.bubbleSize * 0.5)
                     .allowsHitTesting(false)
             }
-            island(state: state, open: open, glassy: glassy, size: size, shape: shape, light: light, glow: glow, rim: rim)
+            island(state: state, open: open, glassy: glassy, size: size, shape: shape, light: light, glow: glow, rim: rim,
+                   openness: openness, pulling: pulling, contentOpacity: pulling ? Self.reveal(k) : 1)
             if state == .wings, let np = model.nowPlaying {
                 MusicDrop(info: np, size: Self.bubbleSize)
                     .scaleEffect(bubble ? 1 : 0.5)
@@ -107,10 +116,29 @@ struct NotchRootView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .animation(Motion.spring(for: state), value: size)
+        .animation(pulling ? Self.follow : Motion.spring(for: state), value: size)
         .animation(Motion.drop, value: bubble)
         .animation(.smooth(duration: 0.7), value: light)
         .environment(\.colorScheme, .dark)
+    }
+
+    /// The island's size: its state's size, or while pulled the blend between what it is at rest and fully open.
+    private func islandSize(state: IslandState, wing: CGFloat, pulling: Bool, p: CGFloat, k: CGFloat) -> CGSize {
+        let full = geometry.shapeSize(state, height: model.contentHeights[state], anticipating: model.anticipating, wing: wing)
+        guard pulling else { return full }
+        let rest = geometry.shapeSize(model.restingState, wing: wing)
+        // wider first, then taller, like the iPhone's island: the card is never cut at the sides while it grows
+        let wide = min(k / 0.6, 1)
+        return CGSize(width: rest.width + (full.width - rest.width) * wide, height: rest.height + (full.height - rest.height) * p)
+    }
+
+    /// While the fingers are down: tight to them, so it tracks closely and still settles smoothly.
+    static let follow = Animation.interactiveSpring(response: 0.12, dampingFraction: 0.9, blendDuration: 0.1)
+
+    /// The card fades in over the middle of the pull, so it is never read half-grown.
+    static func reveal(_ k: Double) -> Double {
+        let t = min(max((k - 0.3) / 0.5, 0), 1)
+        return t * t * (3 - 2 * t)
     }
 
     /// Size of the music drop beside the island, and the gap it keeps once it has split off.
@@ -119,7 +147,7 @@ struct NotchRootView: View {
 
     @ViewBuilder
     private func island(state: IslandState, open: Bool, glassy: Bool, size: CGSize, shape: NotchShape,
-                        light: Color, glow: Double, rim: Bool) -> some View {
+                        light: Color, glow: Double, rim: Bool, openness: Double, pulling: Bool, contentOpacity: Double) -> some View {
         ZStack(alignment: .top) {
             // black body with a soft coloured light falling from the top
             ZStack {
@@ -156,6 +184,8 @@ struct NotchRootView: View {
                     .id(contentID)
                     .transition(.blurFade)
             }
+            .opacity(contentOpacity)
+            .allowsHitTesting(!pulling)
             .animation(Motion.content, value: contentID)
         }
         .frame(width: size.width, height: size.height, alignment: .top)
@@ -178,8 +208,8 @@ struct NotchRootView: View {
             .allowsHitTesting(false)
         }
         .clipShape(shape)
-        .shadow(color: .black.opacity(open ? 0.5 : 0), radius: 8, y: 3)          // tight contact shadow
-        .modifier(Jelly(trigger: state, open: open))
+        .shadow(color: .black.opacity(0.5 * openness), radius: 8, y: 3)          // tight contact shadow
+        .modifier(Jelly(trigger: state, open: open, amount: pulling ? 0 : 1))
     }
 
     // MARK: - The cards

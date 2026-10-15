@@ -97,6 +97,8 @@ final class NotchModel: ObservableObject {
 
     // The island
     @Published var hovering = false
+    /// How far two fingers have pulled the island open (see PullTracker); read only by the island's own view.
+    let pull = PullState()
     @Published var flash: Flash?
     /// The volume or brightness you just changed, shown beside the notch.
     @Published var hud: HUDReading?
@@ -161,6 +163,23 @@ final class NotchModel: ObservableObject {
         if dragging || dropTargeted { return .shelf }
         if let c = homeChoice, c != .recent || !notifications.isEmpty { return c }
         return nowPlaying?.isMeaningful == true ? .player : .shelf     // paused is still the player, so play can be pressed again
+    }
+
+    /// Which way the last tab you picked lies from the one before (+1 right, -1 left, 0 for a change by itself),
+    /// so the two panes slide toward each other's side.
+    private(set) var homeStep = 0
+
+    /// A tab picked in the header. The direction is published a moment before the change itself, because a pane
+    /// that is leaving keeps the transition it had when it was last drawn.
+    func selectTab(_ tab: HomeTab) {
+        let order: [HomeTab] = [.player, .shelf, .recent]
+        let from = order.firstIndex(of: homeTab) ?? 0, to = order.firstIndex(of: tab) ?? 0
+        guard from != to else { return }
+        homeStep = to > from ? 1 : -1
+        objectWillChange.send()
+        DispatchQueue.main.async { [self] in
+            if tab == .recent { openRecent() } else { homeChoice = tab }
+        }
     }
 
     var showMusicBesideNotch: Bool {
@@ -678,8 +697,12 @@ final class NotchModel: ObservableObject {
         if finished != nil { return .finished }
         if outcome != nil { return .result }
         if hovering || dragging { return .overview }
-        if hud != nil || flash != nil || liveSession != nil || !jobs.isEmpty || musicWingsOn { return .wings }
-        return .closed
+        return restingState
+    }
+
+    /// What the island shows when nothing has opened it: the widened notch while something is live, else just the notch.
+    var restingState: IslandState {
+        (hud != nil || flash != nil || liveSession != nil || !jobs.isEmpty || musicWingsOn) ? .wings : .closed
     }
     var isOpen: Bool { [.approval, .notification, .finished, .result, .overview].contains(state) }
 
