@@ -1,6 +1,6 @@
 cask "notch-plus" do
-  version "0.2"
-  sha256 "def3e7bf3a8a70a63fb9a7046a552d3feaca58109f56786292b9fffc1760f7c3"
+  version "0.3"
+  sha256 "b2d3a0a5433529af7f9800859f5881281f600ff03fa9135672f3a2182a9b92da"
 
   url "https://github.com/Nurik-dz/notch-plus/releases/download/v#{version}/Notch-Plus-#{version}.dmg"
   name "Notch+"

@@ -43,7 +43,7 @@ Notifications from every app, with per-app control and Focus awareness. Messages
 
 <p><img src="assets/player.gif" width="300" align="right" alt="The floating player: large, lyrics, the album's songs, small and medium"></p>
 
-Hover the notch while anything plays: cover glow, controls and a seek bar you can click and drag. It works with Music, Spotify, Podcasts and web video. Drag the player down and it floats above your windows, in three sizes (double-click to change). In Apple Music the large size shows synced lyrics and the album's songs, and you can favourite, shuffle and repeat. Swipe two fingers left or right on the notch to skip, and the new song's name shows beside the notch when it changes. Lyrics and songs come from your own library, and only for songs that are files in it.
+Hover the notch while anything plays: cover glow, controls and a seek bar you can click and drag. It works with Music, Spotify, Podcasts and web video. Drag the player down and it floats above your windows, in three sizes (double-click to change). The floating player is off until you drag it out or switch it on from the menu bar. In Apple Music the large size shows synced lyrics and the album's songs, and you can favourite, shuffle and repeat. Swipe two fingers left or right on the notch to skip, and the new song's name shows beside the notch when it changes. Lyrics and songs come from your own library, and only for songs that are files in it.
 
 <br clear="right">
 
@@ -51,7 +51,7 @@ Hover the notch while anything plays: cover glow, controls and a seek bar you ca
 
 <p><img src="assets/shelf.png" width="460" align="right" alt="The shelf holding an audio file, with Ask and Transcribe and its menu"></p>
 
-Drag files toward the notch and park them. Drag them out into any app (several at once), zip them, or run on-device actions: summarize, extract text, remove a background, transcribe audio and video, translate, convert. Ask a question about a PDF, text file, picture, audio or video. Files are never copied, moved or deleted.
+Drag files toward the notch and park them. Drag them out into any app (several at once), zip them, or run on-device actions: summarize, extract text, remove a background, transcribe audio and video, translate, convert. Every file shows one clear first action, and the rest sit under More. Ask a question about a PDF, text file, picture, audio or video. Files are never copied, moved or deleted.
 
 <br clear="right">
 
@@ -77,7 +77,7 @@ Needs a Mac with Apple silicon and macOS 26 or later.
 
 ### Download
 
-Get **Notch-Plus-0.2.dmg** from the [latest release](https://github.com/Nurik-dz/notch-plus/releases/latest), open it and drag Notch+ into Applications.
+Get **Notch-Plus-0.3.dmg** from the [latest release](https://github.com/Nurik-dz/notch-plus/releases/latest), open it and drag Notch+ into Applications.
 
 > **Notch+ is not notarized by Apple.** Notarizing needs a paid Apple Developer account, and I am not able to enroll in it. The app is signed ad-hoc and the full source is in this repository, so you can read it or build it yourself. The cost is a one-time warning on first launch:
 >
@@ -118,7 +118,7 @@ In the gear menu or the menu bar item, open Settings:
 
 | Do this | To get |
 |---|---|
-| Hover the notch, or swipe two fingers down over it | Open the island |
+| Hover the notch, or slide two fingers down over it | Open the island. It follows your fingers, resists past fully open, and a quick flick finishes the move. Slide up to close |
 | Swipe two fingers left or right on the notch | Next or previous song |
 | Drag the player card down, double-click it | A floating player, and its size |
 | Drag files toward the notch | The shelf opens |

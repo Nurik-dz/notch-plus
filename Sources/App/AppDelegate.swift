@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The floating player never comes back by itself: dragging the player out of the notch or the menu bar item
+        // turns it on for this session only.
+        model.floatingPlayerOn = false
         // Apple Intelligence and Focus, on this Mac only.
         model.triage = { raw in await Intelligence.triage(raw, appName: AppLookup.name(for: raw.bundleID)) }
         model.explain = { r in await Intelligence.explain(tool: r.tool, headline: r.headline, detail: r.detail) }
